@@ -49,8 +49,7 @@ frames of presence), labelled with screen time:
 | Tracking-continuity recall (label-free) | 0.83 |
 | Unit tests | 27 passing |
 
-Full write-up: **`reports/TECHNICAL_REPORT.docx`**; methodology and alternatives in
-`DOCUMENTATION.md`.
+Methodology, model choices, and alternatives: `DOCUMENTATION.md`.
 
 ---
 
