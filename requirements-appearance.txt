@@ -1,0 +1,13 @@
+# Optional: clothing/body appearance re-ID (cross-scene linking).
+# Only needed when config.APPEARANCE_ENABLE = True. The core pipeline
+# (requirements.txt) runs without these.
+#
+#   .venv/bin/pip install -r requirements-appearance.txt
+#   # set config.APPEARANCE_ENABLE = True
+#   .venv/bin/python run_pipeline.py
+#
+torch>=2.2.0
+torchvision>=0.17.0
+torchreid>=0.2.5
+gdown>=5.0.0          # torchreid fetches pretrained weights via gdown
+tensorboard>=2.15.0   # imported by torchreid.reid.utils

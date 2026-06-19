@@ -1,0 +1,11 @@
+yt-dlp>=2024.1.0
+opencv-python>=4.9.0
+numpy>=1.26
+insightface>=0.7.3
+onnxruntime>=1.17.0
+scikit-learn>=1.4.0
+pandas>=2.2.0
+tqdm>=4.66.0
+supervision>=0.26.0
+trackers>=2.0.0
+pytest>=8.0.0
