@@ -30,6 +30,7 @@ OCR_CSV = DATA / "ocr.csv"
 CAPTIONS_CSV = DATA / "captions.csv"
 METADATA_CSV = DATA / "frame_metadata.csv"
 METADATA_JSON = DATA / "frame_metadata.json"
+TEXT_EMB_FILE = EMB_DIR / "text_embeddings.npz"
 
 # ---- Fix #4: sampling rate ----
 # 1 FPS: one sample/sec. Sparser than 2 FPS (may miss sub-second appearances)
@@ -193,6 +194,16 @@ CAPTION_PROMPT = ""         # optional conditioning text (e.g. "a photo of"). Em
 # with the OCR text is at/above this Jaccard ratio.
 CAPTION_TEXT_ECHO_JACCARD = 0.5
 
+# ---- Milestone 2: semantic search (text embeddings) ----
+# Each frame's searchable text (caption + OCR text) is embedded with a compact
+# sentence-transformer so queries match by MEANING, not just substring -- e.g.
+# "train" surfaces a caption that says "subway". all-MiniLM-L6-v2 is ~80MB and
+# runs in seconds on the M2 (MPS/CPU). embed_text.py builds the index.
+TEXT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+TEXT_EMBED_DEVICE = "auto"      # "auto" | "mps" | "cpu" | "cuda"
+SEMANTIC_TOP_K = 20            # default max results for a semantic query
+SEMANTIC_MIN_SCORE = 0.20     # drop matches below this cosine similarity
+
 # InsightFace model bundle (SCRFD detector + ArcFace recog + gender/age)
 MODEL_PACK = "buffalo_l"
 
@@ -223,6 +234,7 @@ _STAGE_PARAMS = {
             "OCR_UPSCALE"],
     "caption": ["FPS", "CAPTION_MODEL", "CAPTION_MAX_TOKENS", "CAPTION_PROMPT"],
     "metadata": [],     # cheap join; run_pipeline rebuilds it every run (see note)
+    "embed": ["TEXT_EMBED_MODEL"],
 }
 
 

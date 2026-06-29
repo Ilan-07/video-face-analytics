@@ -103,12 +103,19 @@ def main():
     # 8. Metadata repository  (always rebuilt: it is a cheap join of ocr.csv,
     #    captions.csv and identities, so we never risk it going stale when an
     #    upstream artifact is regenerated out-of-band).
-    _ = m2_ran  # M2 OCR/caption ran flag (kept for log symmetry above)
     import build_metadata
     build_metadata.run()
     _stamp("metadata")
 
-    # 9. Evaluation (Fix #3)
+    # 9. Semantic index  (rerun if text changed or the embed model changed)
+    if ran or m2_ran or _stale("embed", [config.TEXT_EMB_FILE], args.force):
+        import embed_text
+        embed_text.run()
+        _stamp("embed")
+    else:
+        log.info("[skip] semantic index already built")
+
+    # 10. Evaluation (Fix #3)
     if not args.no_eval:
         import eval as evaluation
         evaluation.run()

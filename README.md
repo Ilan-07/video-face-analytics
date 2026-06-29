@@ -55,8 +55,8 @@ repository you can query by word or phrase. See
   inputs or settings change — fast iteration, inspectable intermediates.
 - **Searchable frame dataset (Milestone 2).** Every frame is OCR'd and captioned,
   and joined with its face IDs into one structured metadata repository that powers
-  a text/phrase search over the whole video.
-- **Self-checking.** 46 unit tests plus two label-free evaluation harnesses run as
+  both keyword and **semantic** (embedding-based) search over the whole video.
+- **Self-checking.** 50 unit tests plus two label-free evaluation harnesses run as
   part of the pipeline.
 
 ---
@@ -97,7 +97,7 @@ frames of presence), labelled with screen time:
 | Co-occurrence precision (label-free) | 1.0000 |
 | Tracking-continuity recall (label-free) | 0.83 |
 | Frames with OCR text / captions (Milestone 2) | 180 / 1,415 |
-| Unit tests | 46 passing |
+| Unit tests | 50 passing |
 
 Methodology, model choices, and alternatives: `DOCUMENTATION.md`.
 
@@ -121,8 +121,10 @@ Methodology, model choices, and alternatives: `DOCUMENTATION.md`.
 7. **Captioning** (`caption.py`) — BLIP-base scene captions (Apple MPS / CPU), → `data/captions.csv`.
 8. **Metadata repository** (`build_metadata.py`) — joins frame → face IDs → OCR text
    → caption into `data/frame_metadata.{json,csv}`.
-9. **Evaluation** (`eval.py`, `eval_cooccurrence.py`, `eval_continuity.py`) —
-   complete-linkage threshold sweep + label-free precision/recall checks.
+9. **Semantic index** (`embed_text.py`) — embeds each frame's caption + OCR text with
+   a sentence-transformer → `data/embeddings/text_embeddings.npz`.
+10. **Evaluation** (`eval.py`, `eval_cooccurrence.py`, `eval_continuity.py`) —
+    complete-linkage threshold sweep + label-free precision/recall checks.
 
 Stages communicate through CSV/artifact files under `data/`, so any stage can be
 rerun in isolation and every intermediate is inspectable.
@@ -143,6 +145,10 @@ not just who appears.
   IDs** (via the same `faces → identities` join the analytics uses), OCR text, and
   caption into `data/frame_metadata.json` (canonical, `face_ids` as an array) and
   `data/frame_metadata.csv`. This is the dataset future milestones consume.
+- **Semantic index** (`embed_text.py`) embeds each frame's caption + OCR text with
+  a compact sentence-transformer (`all-MiniLM-L6-v2`, ~80MB, MPS/CPU) into a
+  normalized vector index, so queries can match by **meaning** rather than literal
+  text.
 
 ### Search
 
@@ -151,19 +157,23 @@ where it appears. Consecutive frames showing the same text are collapsed into on
 time range, so a title card on screen for six seconds reads as a single hit:
 
 ```bash
-.venv/bin/python search.py "Bakerloo"             # search OCR text (grouped ranges)
-.venv/bin/python search.py "platform" --captions  # also search captions
-.venv/bin/python search.py "embankment" --fuzzy   # tolerate OCR typos
-.venv/bin/python search.py "Line \d+" --regex      # regex search
-.venv/bin/python search.py "Welcome" --open        # open the matching frames
-.venv/bin/python -m streamlit run search_app.py   # interactive UI with frame previews
+.venv/bin/python search.py "Bakerloo"                   # OCR text (grouped ranges)
+.venv/bin/python search.py "platform" --captions        # also search captions
+.venv/bin/python search.py "embankment" --fuzzy         # tolerate OCR typos
+.venv/bin/python search.py "Line \d+" --regex            # regex search
+.venv/bin/python search.py "underground train" --semantic  # search by meaning
+.venv/bin/python search.py "Welcome" --open              # open the matching frames
+.venv/bin/python -m streamlit run search_app.py         # interactive UI (lexical + semantic)
 ```
 
-Example — `search.py "Bakerloo"` →
+**Lexical** — `search.py "Bakerloo"` →
 `[ 0:06–0:08 ] (3 frame(s)) ocr_text: Bakerloo Line`. Each result carries the face
-IDs present and a snippet of the matched text; `--no-group` lists every frame
-instead. The Streamlit app renders the matching frames inline with the same
-fuzzy/regex/caption toggles.
+IDs present and a snippet of the matched text; `--no-group` lists every frame.
+
+**Semantic** — `search.py "underground train" --semantic` ranks frames by embedding
+similarity, surfacing captions like *"a subway train"* and *"a train coming out of
+the tunnel"* that share **no literal words** with the query. The Streamlit app
+exposes both modes (a Lexical/Semantic toggle) plus the fuzzy/regex/caption options.
 
 ## Outputs
 
@@ -182,6 +192,7 @@ After a run, results land in `reports/` and `data/`:
 | `data/ocr.csv` | Per-frame OCR text + face IDs, token count, mean confidence (Milestone 2). |
 | `data/captions.csv` | Per-frame BLIP caption + face IDs + OCR text (Milestone 2). |
 | `data/frame_metadata.{json,csv}` | Frame → timestamp → face IDs → OCR text → caption (+ text-echo flag) (Milestone 2). |
+| `data/embeddings/text_embeddings.npz` | Normalized caption+OCR text vectors for semantic search (Milestone 2). |
 
 ## Setup
 ```bash
@@ -231,9 +242,9 @@ plus metadata-schema checks — so refactors stay honest.
 ```
 download.py          extract_frames.py   detect_faces.py    recognize.py
 analytics.py         appearance.py       run_pipeline.py    preview_faces.py
-ocr.py               caption.py          build_metadata.py  search.py
-search_app.py        eval.py             eval_cooccurrence.py eval_continuity.py
-eval_detection.py    config.py           util.py            tests/
-screenshots/         requirements.txt    requirements-appearance.txt
-DOCUMENTATION.md
+ocr.py               caption.py          build_metadata.py  embed_text.py
+search.py            search_app.py       config.py          util.py
+eval.py              eval_cooccurrence.py eval_continuity.py eval_detection.py
+tests/               screenshots/        requirements.txt   DOCUMENTATION.md
+requirements-appearance.txt
 ```

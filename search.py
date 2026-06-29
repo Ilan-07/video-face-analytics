@@ -6,12 +6,15 @@ Reusable core (used by the Streamlit app and the tests) plus a small CLI:
     python search.py "city" --captions      # also search captions
     python search.py "embankment" --fuzzy   # tolerate OCR typos
     python search.py "Line \\d+" --regex     # regex search
+    python search.py "underground train" --semantic   # search by meaning
     python search.py "Welcome" --open       # open matching frames (macOS)
 
-Returns every frame whose text matches the query, with timestamp and frame path
-so callers can display the corresponding frames. Consecutive frames with the same
-matched text are also collapsible into time ranges (group_consecutive), so a
-title card shown for six seconds reads as one 0:00-0:05 hit, not six rows.
+The lexical modes (substring/regex/fuzzy) return every frame whose text matches,
+with timestamp and frame path. `--semantic` instead ranks all frames by the cosine
+similarity of their caption+OCR embedding to the query embedding (built by
+embed_text.py), so it retrieves by meaning -- "train" surfaces a "subway" caption.
+Consecutive frames with the same matched text are collapsible into time ranges
+(group_consecutive), so a title card shown for six seconds reads as one hit.
 """
 import argparse
 import difflib
@@ -20,6 +23,7 @@ import re
 import subprocess
 import sys
 
+import numpy as np
 import pandas as pd
 
 import config
@@ -150,6 +154,77 @@ def group_consecutive(results: pd.DataFrame, max_gap: float | None = None):
     return groups
 
 
+def _topk_similar(qvec: np.ndarray, mat: np.ndarray, k: int):
+    """Cosine similarity of a normalized query vector against normalized rows of
+    `mat`; return (indices, scores) of the top-k, highest first. Pure -- unit
+    tested with synthetic vectors, no model needed."""
+    sims = mat @ qvec
+    k = min(k, len(sims))
+    idx = np.argpartition(-sims, k - 1)[:k] if k < len(sims) else np.arange(len(sims))
+    idx = idx[np.argsort(-sims[idx])]
+    return idx, sims[idx]
+
+
+_ST_MODEL = None
+
+
+def _get_embed_model():
+    global _ST_MODEL
+    if _ST_MODEL is None:
+        import embed_text
+        _ST_MODEL = embed_text.load_model()
+    return _ST_MODEL
+
+
+def semantic_search(query: str, df: pd.DataFrame | None = None,
+                    top_k: int | None = None,
+                    min_score: float | None = None) -> pd.DataFrame:
+    """Rank frames by semantic similarity of their caption+OCR text to the query.
+
+    Loads the embedding index built by embed_text.py and the same model used to
+    build it. Returns the same columns as search(), with `score` = cosine
+    similarity (0-1) and `field` = "semantic", highest first."""
+    import embed_text
+
+    top_k = config.SEMANTIC_TOP_K if top_k is None else top_k
+    min_score = config.SEMANTIC_MIN_SCORE if min_score is None else min_score
+    cols = ["frame_id", "timestamp_sec", "mmss", "filename", "frame_path",
+            "face_ids", "field", "score", "snippet"]
+    q = (query or "").strip()
+    if not q:
+        return pd.DataFrame(columns=cols)
+    if df is None:
+        df = load_metadata()
+
+    data = np.load(config.TEXT_EMB_FILE, allow_pickle=True)
+    mat, frame_ids = data["embeddings"], data["frame_ids"]
+    qvec = embed_text.embed_texts(_get_embed_model(), [q])[0]
+    idx, scores = _topk_similar(qvec, mat, top_k)
+
+    by_id = {int(r.frame_id): r for r in df.itertuples(index=False)}
+    rows = []
+    for i, sc in zip(idx, scores):
+        if sc < min_score:
+            continue
+        r = by_id.get(int(frame_ids[i]))
+        if r is None:
+            continue
+        doc = embed_text.frame_document(getattr(r, "caption", ""),
+                                        getattr(r, "ocr_text", ""))
+        rows.append({
+            "frame_id": int(r.frame_id),
+            "timestamp_sec": float(r.timestamp_sec),
+            "mmss": fmt_ts(float(r.timestamp_sec)),
+            "filename": r.filename,
+            "frame_path": str(config.FRAME_DIR / r.filename),
+            "face_ids": list(r.face_ids),
+            "field": "semantic",
+            "score": round(float(sc), 3),
+            "snippet": (doc[:80] + "…") if len(doc) > 80 else doc,
+        })
+    return pd.DataFrame(rows, columns=cols)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Search frame OCR text / captions")
     ap.add_argument("query", help="word or phrase to search for")
@@ -158,11 +233,33 @@ def main():
     ap.add_argument("--regex", action="store_true", help="treat query as a regex")
     ap.add_argument("--fuzzy", action="store_true",
                     help="fall back to fuzzy matching for OCR typos")
+    ap.add_argument("--semantic", action="store_true",
+                    help="rank frames by meaning using text embeddings")
+    ap.add_argument("--top-k", type=int, default=None,
+                    help="max results for --semantic (default config.SEMANTIC_TOP_K)")
     ap.add_argument("--no-group", action="store_true",
                     help="list every matching frame instead of time ranges")
     ap.add_argument("--open", action="store_true", dest="open_frames",
                     help="open the matching frames (one per range) in the viewer")
     args = ap.parse_args()
+
+    if args.semantic:
+        res = semantic_search(args.query, top_k=args.top_k)
+        if res.empty:
+            print(f'No frames semantically matched "{args.query}".')
+            return
+        print(f'Top {len(res)} semantic match(es) for "{args.query}":\n')
+        for r in res.itertuples(index=False):
+            faces = ", ".join(r.face_ids) if r.face_ids else "-"
+            print(f"  [{r.mmss:>6}]  score={r.score:.3f}  {r.filename}  "
+                  f"(faces: {faces})")
+            print(f"           {r.snippet}")
+        if args.open_frames:
+            opener = {"darwin": "open", "linux": "xdg-open"}.get(
+                sys.platform, "open")
+            for r in res.itertuples(index=False):
+                subprocess.run([opener, r.frame_path], check=False)
+        return
 
     fields = ("ocr_text", "caption") if args.captions else ("ocr_text",)
     res = search(args.query, fields=fields, regex=args.regex, fuzzy=args.fuzzy)

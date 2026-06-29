@@ -14,9 +14,11 @@ from detect_faces import _reconcile
 from eval_labeled import _pairwise
 from recognize import _quality_weight, _robust_template, _link_clusters
 from appearance import body_box
-from search import search, fmt_ts, _snippet, group_consecutive
+from search import (search, fmt_ts, _snippet, group_consecutive,
+                    _topk_similar)
 from ocr import _keep_token, _filter_tokens
 from build_metadata import caption_echoes_text
+from embed_text import frame_document
 
 
 # ---------------------------------------------------------------- geometry
@@ -361,6 +363,45 @@ def test_caption_echoes_text_flags_title_card():
 def test_caption_echoes_text_false_for_scene():
     assert caption_echoes_text("a man walking down the platform",
                                "EMBANKMENT") is False
+
+
+# ------------------------------------------------------- M2: semantic ranking
+def test_topk_similar_ranks_by_cosine():
+    # normalized rows; query aligns with row 1, then row 2, then row 0.
+    mat = np.array([[1.0, 0.0], [0.0, 1.0], [0.7071, 0.7071]])
+    q = np.array([0.0, 1.0])
+    idx, scores = _topk_similar(q, mat, k=3)
+    assert idx[0] == 1                       # exact match first
+    assert idx[-1] == 0                      # orthogonal last
+    assert scores[0] == pytest.approx(1.0)
+    assert list(scores) == sorted(scores, reverse=True)
+
+
+def test_topk_similar_k_caps_results():
+    mat = np.eye(4)
+    idx, _ = _topk_similar(np.array([1.0, 0, 0, 0]), mat, k=2)
+    assert len(idx) == 2 and idx[0] == 0
+
+
+def test_frame_document_joins_caption_and_ocr():
+    assert frame_document("a subway train", "EMBANKMENT") == \
+        "a subway train. EMBANKMENT"
+    assert frame_document("a subway train", "") == "a subway train"
+    assert frame_document("", "") == ""
+
+
+def test_semantic_index_matches_metadata():
+    # If the semantic index exists, it must align with the metadata repository.
+    if not config.TEXT_EMB_FILE.exists() or not config.METADATA_JSON.exists():
+        pytest.skip("semantic index not generated yet")
+    data = np.load(config.TEXT_EMB_FILE, allow_pickle=True)
+    with open(config.METADATA_JSON) as f:
+        n_meta = len(json.load(f))
+    assert data["embeddings"].shape[0] == n_meta
+    assert data["embeddings"].shape[0] == len(data["frame_ids"])
+    # rows are L2-normalized -> norms ~ 1
+    norms = np.linalg.norm(data["embeddings"], axis=1)
+    assert np.allclose(norms, 1.0, atol=1e-3)
 
 
 # ------------------------------------------------------- M2: artifact schemas
