@@ -100,15 +100,13 @@ def main():
     else:
         log.info("[skip] captions already generated")
 
-    # 8. Metadata repository  (pure join; rerun if any upstream M2 stage ran)
-    if (ran or m2_ran
-            or _stale("metadata", [config.METADATA_JSON, config.METADATA_CSV],
-                      args.force)):
-        import build_metadata
-        build_metadata.run()
-        _stamp("metadata")
-    else:
-        log.info("[skip] frame metadata already built")
+    # 8. Metadata repository  (always rebuilt: it is a cheap join of ocr.csv,
+    #    captions.csv and identities, so we never risk it going stale when an
+    #    upstream artifact is regenerated out-of-band).
+    _ = m2_ran  # M2 OCR/caption ran flag (kept for log symmetry above)
+    import build_metadata
+    build_metadata.run()
+    _stamp("metadata")
 
     # 9. Evaluation (Fix #3)
     if not args.no_eval:

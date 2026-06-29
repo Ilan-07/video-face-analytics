@@ -48,6 +48,26 @@ def blur_var(bgr) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
+def face_ids_by_frame() -> dict:
+    """Map frame_id -> sorted list of distinct real face_ids present in it (M2).
+
+    Shared by ocr.py, caption.py and build_metadata.py so every per-frame store
+    associates the same Face IDs. Mirrors analytics._load's join: faces.csv
+    (frame_id, track_id) -> identities.csv (track_id -> face_id), dropping
+    unassigned / "unknown" detections. pandas is imported lazily to keep this
+    module cheap for callers that only need the geometry helpers."""
+    import pandas as pd
+
+    faces = pd.read_csv(config.FACES_CSV)
+    ident = pd.read_csv(config.IDENTITIES_CSV)
+    faces = faces.merge(ident[["track_id", "face_id"]], on="track_id", how="left")
+    faces = faces[faces["face_id"].notna() & (faces["face_id"] != "unknown")]
+    out: dict[int, list[str]] = {}
+    for frame_id, g in faces.groupby("frame_id"):
+        out[int(frame_id)] = sorted(g["face_id"].unique().tolist())
+    return out
+
+
 def ocr_preprocess(bgr):
     """Grayscale + upscale + Otsu threshold to sharpen text for Tesseract (M2).
 

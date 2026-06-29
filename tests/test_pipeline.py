@@ -14,7 +14,9 @@ from detect_faces import _reconcile
 from eval_labeled import _pairwise
 from recognize import _quality_weight, _robust_template, _link_clusters
 from appearance import body_box
-from search import search, fmt_ts, _snippet
+from search import search, fmt_ts, _snippet, group_consecutive
+from ocr import _keep_token, _filter_tokens
+from build_metadata import caption_echoes_text
 
 
 # ---------------------------------------------------------------- geometry
@@ -284,6 +286,83 @@ def test_snippet_centers_on_match():
     assert "brown" in s
 
 
+def test_search_regex():
+    df = _meta_df()
+    res = search(r"WELCOME\s+BACK", df=df, regex=True)
+    assert res["frame_id"].tolist() == [2]
+
+
+def test_search_fuzzy_tolerates_typo():
+    df = pd.DataFrame.from_records([
+        {"frame_id": 0, "timestamp_sec": 0.0, "filename": "f.jpg",
+         "face_ids": [], "ocr_text": "london embankmnt station", "caption": ""},
+    ])
+    # exact miss (OCR dropped a letter), fuzzy hit on the misspelled token
+    assert search("embankment", df=df).empty
+    assert not search("embankment", df=df, fuzzy=True).empty
+
+
+def test_search_score_counts_occurrences():
+    df = pd.DataFrame.from_records([
+        {"frame_id": 0, "timestamp_sec": 0.0, "filename": "f.jpg",
+         "face_ids": [], "ocr_text": "go go go", "caption": ""},
+    ])
+    assert search("go", df=df).iloc[0]["score"] == 3
+
+
+# ------------------------------------------------------- M2: time-range grouping
+def test_group_consecutive_collapses_same_text():
+    df = pd.DataFrame.from_records([
+        {"frame_id": 6, "timestamp_sec": 6.0, "filename": "a.jpg",
+         "face_ids": [], "ocr_text": "Bakerloo Line", "caption": ""},
+        {"frame_id": 7, "timestamp_sec": 7.0, "filename": "b.jpg",
+         "face_ids": [], "ocr_text": "Bakerloo Line", "caption": ""},
+        {"frame_id": 8, "timestamp_sec": 8.0, "filename": "c.jpg",
+         "face_ids": [], "ocr_text": "Bakerloo Line", "caption": ""},
+    ])
+    groups = group_consecutive(search("Bakerloo", df=df))
+    assert len(groups) == 1
+    assert groups[0]["start"] == "0:06" and groups[0]["end"] == "0:08"
+    assert groups[0]["frames"] == 3
+
+
+def test_group_consecutive_splits_on_gap():
+    df = pd.DataFrame.from_records([
+        {"frame_id": 0, "timestamp_sec": 0.0, "filename": "a.jpg",
+         "face_ids": [], "ocr_text": "EXIT", "caption": ""},
+        {"frame_id": 99, "timestamp_sec": 99.0, "filename": "b.jpg",
+         "face_ids": [], "ocr_text": "EXIT", "caption": ""},
+    ])
+    assert len(group_consecutive(search("EXIT", df=df))) == 2
+
+
+# ------------------------------------------------------- M2: OCR token filter
+def test_keep_token_rejects_short_and_lowconf():
+    assert _keep_token("Welcome", 95) is True
+    assert _keep_token("ei", 95) is False          # too short
+    assert _keep_token("Wa}", 40) is False         # below min_conf
+    assert _keep_token("123", 95) is False         # no letter
+
+
+def test_filter_tokens_drops_noise_keeps_text():
+    words = ["Welcome", "Wa}", "ei", "London", "a"]
+    confs = [95, 40, 95, 90, 99]
+    toks, kept = _filter_tokens(words, confs)
+    assert toks == ["Welcome", "London"]
+    assert kept == [95.0, 90.0]
+
+
+# ------------------------------------------------------- M2: caption text-echo
+def test_caption_echoes_text_flags_title_card():
+    assert caption_echoes_text("london underground all lines",
+                               "London Underground All Lines") is True
+
+
+def test_caption_echoes_text_false_for_scene():
+    assert caption_echoes_text("a man walking down the platform",
+                               "EMBANKMENT") is False
+
+
 # ------------------------------------------------------- M2: artifact schemas
 # These validate the generated dataset; they skip cleanly before the pipeline
 # has been run so the unit suite stays green on a fresh checkout.
@@ -291,7 +370,8 @@ def test_ocr_csv_schema():
     if not config.OCR_CSV.exists():
         pytest.skip("ocr.csv not generated yet")
     df = pd.read_csv(config.OCR_CSV)
-    assert set(["frame_id", "timestamp_sec", "text",
+    # Task 1: OCR text stored with frame id, timestamp AND associated face ids.
+    assert set(["frame_id", "timestamp_sec", "face_ids", "text",
                 "n_tokens", "mean_conf"]).issubset(df.columns)
 
 
@@ -299,7 +379,9 @@ def test_captions_csv_schema():
     if not config.CAPTIONS_CSV.exists():
         pytest.skip("captions.csv not generated yet")
     df = pd.read_csv(config.CAPTIONS_CSV)
-    assert set(["frame_id", "timestamp_sec", "caption"]).issubset(df.columns)
+    # Task 3: captions stored with frame id, timestamp, face ids AND ocr text.
+    assert set(["frame_id", "timestamp_sec", "face_ids",
+                "ocr_text", "caption"]).issubset(df.columns)
 
 
 def test_metadata_repository_has_task4_fields():

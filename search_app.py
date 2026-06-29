@@ -3,7 +3,8 @@
 Run:  .venv/bin/python -m streamlit run search_app.py
 
 Type a word or phrase; matching frames are shown inline with their timestamp,
-the face IDs present, and the matched text snippet.
+the face IDs present, and the matched text snippet. Consecutive frames with the
+same text are summarised as time ranges.
 """
 import streamlit as st
 
@@ -33,18 +34,25 @@ with col_q:
     query = st.text_input("Search", placeholder='e.g. "Welcome"')
 with col_opt:
     also_caps = st.checkbox("Search captions too", value=False)
+    fuzzy = st.checkbox("Fuzzy (tolerate OCR typos)", value=False)
+    use_regex = st.checkbox("Regex", value=False)
     cols_per_row = st.slider("Columns", 1, 5, 3)
 
 fields = ("ocr_text", "caption") if also_caps else ("ocr_text",)
 
 if query:
-    res = search_core.search(query, df=df, fields=fields)
+    res = search_core.search(query, df=df, fields=fields,
+                             regex=use_regex, fuzzy=fuzzy)
     if res.empty:
         st.warning(f'No frames matched "{query}".')
     else:
-        st.success(f'{len(res)} frame(s) matched "{query}".')
-        ts = ", ".join(res["mmss"].tolist())
-        st.markdown(f"**Timestamps:** {ts}")
+        groups = search_core.group_consecutive(res)
+        st.success(f'{len(res)} frame(s) in {len(groups)} time range(s) '
+                   f'matched "{query}".')
+        ranges = ", ".join(
+            g["start"] if g["start"] == g["end"] else f'{g["start"]}–{g["end"]}'
+            for g in groups)
+        st.markdown(f"**Time ranges:** {ranges}")
 
         rows = res.to_dict("records")
         for i in range(0, len(rows), cols_per_row):

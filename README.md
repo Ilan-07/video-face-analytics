@@ -56,7 +56,7 @@ repository you can query by word or phrase. See
 - **Searchable frame dataset (Milestone 2).** Every frame is OCR'd and captioned,
   and joined with its face IDs into one structured metadata repository that powers
   a text/phrase search over the whole video.
-- **Self-checking.** 37 unit tests plus two label-free evaluation harnesses run as
+- **Self-checking.** 46 unit tests plus two label-free evaluation harnesses run as
   part of the pipeline.
 
 ---
@@ -96,8 +96,8 @@ frames of presence), labelled with screen time:
 | Most frequent face | Face_01 — 21 frames / 9 appearances / 21.0 s |
 | Co-occurrence precision (label-free) | 1.0000 |
 | Tracking-continuity recall (label-free) | 0.83 |
-| Frames with OCR text / captions (Milestone 2) | 391 / 1,415 |
-| Unit tests | 37 passing |
+| Frames with OCR text / captions (Milestone 2) | 180 / 1,415 |
+| Unit tests | 46 passing |
 
 Methodology, model choices, and alternatives: `DOCUMENTATION.md`.
 
@@ -147,17 +147,23 @@ not just who appears.
 ### Search
 
 Search the dataset for a word or phrase and get back the timestamps and frames
-where it appears:
+where it appears. Consecutive frames showing the same text are collapsed into one
+time range, so a title card on screen for six seconds reads as a single hit:
 
 ```bash
-.venv/bin/python search.py "Welcome"              # search OCR text
+.venv/bin/python search.py "Bakerloo"             # search OCR text (grouped ranges)
 .venv/bin/python search.py "platform" --captions  # also search captions
+.venv/bin/python search.py "embankment" --fuzzy   # tolerate OCR typos
+.venv/bin/python search.py "Line \d+" --regex      # regex search
+.venv/bin/python search.py "Welcome" --open        # open the matching frames
 .venv/bin/python -m streamlit run search_app.py   # interactive UI with frame previews
 ```
 
-Example — `search.py "Bakerloo"` returns each matching frame with its timestamp,
-face IDs present, and a snippet of the matched text. The Streamlit app renders the
-matching frames inline.
+Example — `search.py "Bakerloo"` →
+`[ 0:06–0:08 ] (3 frame(s)) ocr_text: Bakerloo Line`. Each result carries the face
+IDs present and a snippet of the matched text; `--no-group` lists every frame
+instead. The Streamlit app renders the matching frames inline with the same
+fuzzy/regex/caption toggles.
 
 ## Outputs
 
@@ -173,9 +179,9 @@ After a run, results land in `reports/` and `data/`:
 | `data/identities.csv` | Per-track identity assignment after grouping. |
 | `data/embeddings/embeddings.npz` | 512-D ArcFace embeddings keyed by crop id. |
 | annotated frames / montages | Boxes + Face IDs, one representative crop per identity. |
-| `data/ocr.csv` | Per-frame OCR text with token count and mean confidence (Milestone 2). |
-| `data/captions.csv` | Per-frame BLIP caption (Milestone 2). |
-| `data/frame_metadata.{json,csv}` | Frame → timestamp → face IDs → OCR text → caption (Milestone 2). |
+| `data/ocr.csv` | Per-frame OCR text + face IDs, token count, mean confidence (Milestone 2). |
+| `data/captions.csv` | Per-frame BLIP caption + face IDs + OCR text (Milestone 2). |
+| `data/frame_metadata.{json,csv}` | Frame → timestamp → face IDs → OCR text → caption (+ text-echo flag) (Milestone 2). |
 
 ## Setup
 ```bash

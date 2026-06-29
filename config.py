@@ -171,7 +171,11 @@ TIMELINE_LANE_H = 26
 # on textureless frames.
 OCR_LANG = "eng"
 OCR_PSM = 3              # Tesseract page segmentation: 3 = fully automatic
-OCR_MIN_CONF = 40       # keep tokens with confidence >= this (0-100)
+OCR_MIN_CONF = 60       # keep tokens with confidence >= this (0-100). 60 (was 40)
+                        # drops the bulk of Tesseract's low-confidence hallucinations
+                        # on textured/no-text frames.
+OCR_MIN_TOKEN_LEN = 3   # drop tokens shorter than this; combined with the
+                        # has-a-letter rule this removes "ei", "a a", stray glyphs.
 OCR_UPSCALE = 1.5       # upscale factor before thresholding (helps small text)
 
 # ---- Milestone 2: image captioning (BLIP-base) ----
@@ -182,6 +186,12 @@ CAPTION_MODEL = "Salesforce/blip-image-captioning-base"
 CAPTION_DEVICE = "auto"     # "auto" | "mps" | "cpu" | "cuda"
 CAPTION_MAX_TOKENS = 30     # max_new_tokens per caption
 CAPTION_BATCH = 1           # frames per forward pass; raise only if RAM allows
+CAPTION_PROMPT = ""         # optional conditioning text (e.g. "a photo of"). Empty
+                            # = unconditional captioning. Changing it re-captions.
+# When a caption mostly echoes the frame's OCR text (a title card) it is a poor
+# scene description; build_metadata flags such captions when their token overlap
+# with the OCR text is at/above this Jaccard ratio.
+CAPTION_TEXT_ECHO_JACCARD = 0.5
 
 # InsightFace model bundle (SCRFD detector + ArcFace recog + gender/age)
 MODEL_PACK = "buffalo_l"
@@ -209,9 +219,10 @@ _STAGE_PARAMS = {
                   "CLUSTER_LINK_ENABLE", "CLUSTER_LINK_DIST",
                   "BEST_SHOT_ENABLE", "BEST_SHOT_K", "BEST_SHOT_DIST",
                   "APPEARANCE_ENABLE", "APPEARANCE_DIST", "APPEARANCE_FACE_DIST"],
-    "ocr": ["FPS", "OCR_LANG", "OCR_PSM", "OCR_MIN_CONF", "OCR_UPSCALE"],
-    "caption": ["FPS", "CAPTION_MODEL", "CAPTION_MAX_TOKENS"],
-    "metadata": [],     # pure join of upstream artifacts; rerun when they change
+    "ocr": ["FPS", "OCR_LANG", "OCR_PSM", "OCR_MIN_CONF", "OCR_MIN_TOKEN_LEN",
+            "OCR_UPSCALE"],
+    "caption": ["FPS", "CAPTION_MODEL", "CAPTION_MAX_TOKENS", "CAPTION_PROMPT"],
+    "metadata": [],     # cheap join; run_pipeline rebuilds it every run (see note)
 }
 
 
