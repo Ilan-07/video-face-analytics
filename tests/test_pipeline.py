@@ -6,12 +6,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import json
+
 import config
 from util import iou, nose_offset, blur_var
 from detect_faces import _reconcile
 from eval_labeled import _pairwise
 from recognize import _quality_weight, _robust_template, _link_clusters
 from appearance import body_box
+from search import search, fmt_ts, _snippet
 
 
 # ---------------------------------------------------------------- geometry
@@ -228,3 +231,84 @@ def test_body_box_clamps_to_frame_edges():
     bx1, by1, bx2, by2 = body_box(600, 440, 640, 480, 640, 480)
     assert bx2 <= 640 and by2 <= 480
     assert bx1 >= 0 and by1 >= 0
+
+
+# ------------------------------------------------------- M2: search core
+def _meta_df():
+    return pd.DataFrame.from_records([
+        {"frame_id": 0, "timestamp_sec": 0.0, "filename": "frame_000000.jpg",
+         "face_ids": ["Face_01"], "ocr_text": "Welcome to the show",
+         "caption": "a man on a stage"},
+        {"frame_id": 1, "timestamp_sec": 65.0, "filename": "frame_000065.jpg",
+         "face_ids": [], "ocr_text": "", "caption": "a city street at night"},
+        {"frame_id": 2, "timestamp_sec": 130.0, "filename": "frame_000130.jpg",
+         "face_ids": ["Face_01", "Face_02"], "ocr_text": "WELCOME BACK",
+         "caption": "two people talking"},
+    ])
+
+
+def test_search_case_insensitive_hit():
+    res = search("welcome", df=_meta_df())
+    assert res["frame_id"].tolist() == [0, 2]      # both OCR rows, sorted by time
+
+
+def test_search_miss_returns_empty():
+    assert search("nonexistent-token", df=_meta_df()).empty
+
+
+def test_search_empty_query_returns_empty():
+    assert search("   ", df=_meta_df()).empty
+
+
+def test_search_passes_through_face_ids_and_mmss():
+    res = search("welcome back", df=_meta_df())
+    assert res.iloc[0]["face_ids"] == ["Face_01", "Face_02"]
+    assert res.iloc[0]["mmss"] == "2:10"          # 130s -> 2:10
+
+
+def test_search_ocr_only_ignores_captions_by_default():
+    # "stage" only appears in a caption -> no OCR hit by default.
+    assert search("stage", df=_meta_df()).empty
+    res = search("stage", df=_meta_df(), fields=("ocr_text", "caption"))
+    assert res["frame_id"].tolist() == [0]
+    assert res.iloc[0]["field"] == "caption"
+
+
+def test_fmt_ts():
+    assert fmt_ts(0) == "0:00"
+    assert fmt_ts(75) == "1:15"
+
+
+def test_snippet_centers_on_match():
+    s = _snippet("the quick brown fox jumps", "brown", width=12)
+    assert "brown" in s
+
+
+# ------------------------------------------------------- M2: artifact schemas
+# These validate the generated dataset; they skip cleanly before the pipeline
+# has been run so the unit suite stays green on a fresh checkout.
+def test_ocr_csv_schema():
+    if not config.OCR_CSV.exists():
+        pytest.skip("ocr.csv not generated yet")
+    df = pd.read_csv(config.OCR_CSV)
+    assert set(["frame_id", "timestamp_sec", "text",
+                "n_tokens", "mean_conf"]).issubset(df.columns)
+
+
+def test_captions_csv_schema():
+    if not config.CAPTIONS_CSV.exists():
+        pytest.skip("captions.csv not generated yet")
+    df = pd.read_csv(config.CAPTIONS_CSV)
+    assert set(["frame_id", "timestamp_sec", "caption"]).issubset(df.columns)
+
+
+def test_metadata_repository_has_task4_fields():
+    if not config.METADATA_JSON.exists():
+        pytest.skip("frame_metadata.json not generated yet")
+    with open(config.METADATA_JSON) as f:
+        records = json.load(f)
+    assert records, "metadata repository is empty"
+    r = records[0]
+    for field in ("frame_id", "timestamp_sec", "face_ids", "ocr_text", "caption"):
+        assert field in r
+    assert isinstance(r["face_ids"], list)   # Task 4: Face IDs as a list

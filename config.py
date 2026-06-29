@@ -25,6 +25,12 @@ EMB_FILE = EMB_DIR / "embeddings.npz"
 TEMPLATE_FILE = EMB_DIR / "track_templates.npz"
 LOG_FILE = REPORT_DIR / "pipeline.log"
 
+# ---- Milestone 2: per-frame text, captions, metadata repository ----
+OCR_CSV = DATA / "ocr.csv"
+CAPTIONS_CSV = DATA / "captions.csv"
+METADATA_CSV = DATA / "frame_metadata.csv"
+METADATA_JSON = DATA / "frame_metadata.json"
+
 # ---- Fix #4: sampling rate ----
 # 1 FPS: one sample/sec. Sparser than 2 FPS (may miss sub-second appearances)
 # but fewer near-duplicate frames and faster end-to-end.
@@ -158,6 +164,25 @@ MAX_ANNOTATED_FRAMES = 8
 TIMELINE_W = 1100
 TIMELINE_LANE_H = 26
 
+# ---- Milestone 2: OCR (Tesseract via pytesseract) ----
+# Tesseract is a system binary (brew install tesseract). We keep OCR torch-free
+# so it stays cheap on 8GB RAM. image_to_data gives per-token confidence; we drop
+# low-confidence tokens so the search index isn't polluted by OCR hallucinations
+# on textureless frames.
+OCR_LANG = "eng"
+OCR_PSM = 3              # Tesseract page segmentation: 3 = fully automatic
+OCR_MIN_CONF = 40       # keep tokens with confidence >= this (0-100)
+OCR_UPSCALE = 1.5       # upscale factor before thresholding (helps small text)
+
+# ---- Milestone 2: image captioning (BLIP-base) ----
+# Salesforce/blip-image-captioning-base (~990MB). Loaded once, frames streamed
+# one at a time so RAM stays flat (~2-3GB peak) on an 8GB M2. Device "auto" picks
+# Apple MPS when available, else CPU.
+CAPTION_MODEL = "Salesforce/blip-image-captioning-base"
+CAPTION_DEVICE = "auto"     # "auto" | "mps" | "cpu" | "cuda"
+CAPTION_MAX_TOKENS = 30     # max_new_tokens per caption
+CAPTION_BATCH = 1           # frames per forward pass; raise only if RAM allows
+
 # InsightFace model bundle (SCRFD detector + ArcFace recog + gender/age)
 MODEL_PACK = "buffalo_l"
 
@@ -184,6 +209,9 @@ _STAGE_PARAMS = {
                   "CLUSTER_LINK_ENABLE", "CLUSTER_LINK_DIST",
                   "BEST_SHOT_ENABLE", "BEST_SHOT_K", "BEST_SHOT_DIST",
                   "APPEARANCE_ENABLE", "APPEARANCE_DIST", "APPEARANCE_FACE_DIST"],
+    "ocr": ["FPS", "OCR_LANG", "OCR_PSM", "OCR_MIN_CONF", "OCR_UPSCALE"],
+    "caption": ["FPS", "CAPTION_MODEL", "CAPTION_MAX_TOKENS"],
+    "metadata": [],     # pure join of upstream artifacts; rerun when they change
 }
 
 

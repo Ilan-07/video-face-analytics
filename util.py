@@ -48,6 +48,21 @@ def blur_var(bgr) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
+def ocr_preprocess(bgr):
+    """Grayscale + upscale + Otsu threshold to sharpen text for Tesseract (M2).
+
+    Small on-screen text reads better after a mild upscale, and a binary image
+    removes background gradients that confuse OCR. Returns a single-channel
+    uint8 image ready for pytesseract."""
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    f = config.OCR_UPSCALE
+    if f and f != 1.0:
+        gray = cv2.resize(gray, None, fx=f, fy=f, interpolation=cv2.INTER_CUBIC)
+    _, th = cv2.threshold(gray, 0, 255,
+                          cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return th
+
+
 def nose_offset(kps) -> float:
     """|horizontal nose offset / inter-eye distance|; ~0 frontal, large => profile.
 

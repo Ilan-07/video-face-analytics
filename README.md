@@ -12,6 +12,11 @@ clustering blindly, the pipeline measures its own correctness with label-free
 checks (two faces in the same frame can never be the same person) and reports the
 numbers.
 
+A second layer (**Milestone 2**) makes the video *searchable*: every frame is
+OCR'd and captioned, then joined with its face IDs into a structured metadata
+repository you can query by word or phrase. See
+[Milestone 2: searchable frame dataset](#milestone-2-searchable-frame-dataset).
+
 **Source video:** https://www.youtube.com/watch?v=d2g9HlwoC-s
 
 > The video, extracted frames, face crops, and the local virtualenv are **not**
@@ -48,7 +53,10 @@ numbers.
   person across separate scenes; a corroboration backstop drops lone non-faces.
 - **Idempotent stages.** Each stage fingerprints its config and only reruns when
   inputs or settings change — fast iteration, inspectable intermediates.
-- **Self-checking.** 27 unit tests plus two label-free evaluation harnesses run as
+- **Searchable frame dataset (Milestone 2).** Every frame is OCR'd and captioned,
+  and joined with its face IDs into one structured metadata repository that powers
+  a text/phrase search over the whole video.
+- **Self-checking.** 37 unit tests plus two label-free evaluation harnesses run as
   part of the pipeline.
 
 ---
@@ -88,7 +96,8 @@ frames of presence), labelled with screen time:
 | Most frequent face | Face_01 — 21 frames / 9 appearances / 21.0 s |
 | Co-occurrence precision (label-free) | 1.0000 |
 | Tracking-continuity recall (label-free) | 0.83 |
-| Unit tests | 27 passing |
+| Frames with OCR text / captions (Milestone 2) | 391 / 1,415 |
+| Unit tests | 37 passing |
 
 Methodology, model choices, and alternatives: `DOCUMENTATION.md`.
 
@@ -108,11 +117,47 @@ Methodology, model choices, and alternatives: `DOCUMENTATION.md`.
    default.
 5. **Analytics** (`analytics.py`) — screen-time, appearances, demographics, montages,
    annotated frames, timeline, `reports/report.html` + `summary.{json,md}`.
-6. **Evaluation** (`eval.py`, `eval_cooccurrence.py`, `eval_continuity.py`) —
+6. **OCR** (`ocr.py`) — Tesseract over every frame, confidence-filtered, → `data/ocr.csv`.
+7. **Captioning** (`caption.py`) — BLIP-base scene captions (Apple MPS / CPU), → `data/captions.csv`.
+8. **Metadata repository** (`build_metadata.py`) — joins frame → face IDs → OCR text
+   → caption into `data/frame_metadata.{json,csv}`.
+9. **Evaluation** (`eval.py`, `eval_cooccurrence.py`, `eval_continuity.py`) —
    complete-linkage threshold sweep + label-free precision/recall checks.
 
 Stages communicate through CSV/artifact files under `data/`, so any stage can be
 rerun in isolation and every intermediate is inspectable.
+
+## Milestone 2: searchable frame dataset
+
+On top of the face analytics, the pipeline builds a structured, searchable dataset
+over every frame so the video can be queried by **what is written or shown** in it,
+not just who appears.
+
+- **OCR** (`ocr.py`) extracts visible text per frame with Tesseract. A per-token
+  confidence gate (`OCR_MIN_CONF`) keeps the index clean. → `data/ocr.csv`.
+- **Captions** (`caption.py`) generate a descriptive caption per frame with
+  **BLIP-base** (`Salesforce/blip-image-captioning-base`), running on Apple **MPS**
+  when available. The model loads once and frames stream one-by-one, so it stays
+  within ~2–3 GB RAM (runs comfortably on an 8 GB M2). → `data/captions.csv`.
+- **Metadata repository** (`build_metadata.py`) joins each frame with its **face
+  IDs** (via the same `faces → identities` join the analytics uses), OCR text, and
+  caption into `data/frame_metadata.json` (canonical, `face_ids` as an array) and
+  `data/frame_metadata.csv`. This is the dataset future milestones consume.
+
+### Search
+
+Search the dataset for a word or phrase and get back the timestamps and frames
+where it appears:
+
+```bash
+.venv/bin/python search.py "Welcome"              # search OCR text
+.venv/bin/python search.py "platform" --captions  # also search captions
+.venv/bin/python -m streamlit run search_app.py   # interactive UI with frame previews
+```
+
+Example — `search.py "Bakerloo"` returns each matching frame with its timestamp,
+face IDs present, and a snippet of the matched text. The Streamlit app renders the
+matching frames inline.
 
 ## Outputs
 
@@ -128,14 +173,19 @@ After a run, results land in `reports/` and `data/`:
 | `data/identities.csv` | Per-track identity assignment after grouping. |
 | `data/embeddings/embeddings.npz` | 512-D ArcFace embeddings keyed by crop id. |
 | annotated frames / montages | Boxes + Face IDs, one representative crop per identity. |
+| `data/ocr.csv` | Per-frame OCR text with token count and mean confidence (Milestone 2). |
+| `data/captions.csv` | Per-frame BLIP caption (Milestone 2). |
+| `data/frame_metadata.{json,csv}` | Frame → timestamp → face IDs → OCR text → caption (Milestone 2). |
 
 ## Setup
 ```bash
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
-Requires `ffmpeg` on PATH. Inference is CPU-only by default
-(`CPUExecutionProvider`); a GPU `onnxruntime` provider is optional.
+Requires `ffmpeg` on PATH. Face inference is CPU-only by default
+(`CPUExecutionProvider`); a GPU `onnxruntime` provider is optional. The Milestone 2
+OCR stage needs the **Tesseract** binary (`brew install tesseract` on macOS); the
+captioning stage uses Apple **MPS** automatically when available, else CPU.
 
 ### Optional: cross-scene clothing re-ID
 An orthogonal appearance signal (same outfit across scenes) that consolidates a person
@@ -159,7 +209,8 @@ dependencies and is recommended only with the human review step:
 .venv/bin/python -m pytest -q
 ```
 The suite covers the pure logic — IoU geometry, blur/pose scoring, the ByteTrack
-birth-frame reconciliation, and the evaluation metrics — so refactors stay honest.
+birth-frame reconciliation, the evaluation metrics, and the Milestone 2 search core
+plus metadata-schema checks — so refactors stay honest.
 
 ## Key tuning (`config.py`)
 - `FPS` — sampling rate (1 FPS per the project spec).
@@ -174,7 +225,9 @@ birth-frame reconciliation, and the evaluation metrics — so refactors stay hon
 ```
 download.py          extract_frames.py   detect_faces.py    recognize.py
 analytics.py         appearance.py       run_pipeline.py    preview_faces.py
-eval.py              eval_cooccurrence.py eval_continuity.py eval_detection.py
-config.py            util.py             tests/             screenshots/
-requirements.txt     requirements-appearance.txt            DOCUMENTATION.md
+ocr.py               caption.py          build_metadata.py  search.py
+search_app.py        eval.py             eval_cooccurrence.py eval_continuity.py
+eval_detection.py    config.py           util.py            tests/
+screenshots/         requirements.txt    requirements-appearance.txt
+DOCUMENTATION.md
 ```

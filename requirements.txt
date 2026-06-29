@@ -9,3 +9,11 @@ tqdm>=4.66.0
 supervision>=0.26.0
 trackers>=2.0.0
 pytest>=8.0.0
+
+# Milestone 2: OCR, captioning, search UI.
+# NOTE: pytesseract needs the Tesseract binary (macOS: `brew install tesseract`).
+pytesseract>=0.3.10
+transformers>=4.40.0
+torch>=2.2.0
+pillow>=10.0.0
+streamlit>=1.33.0
