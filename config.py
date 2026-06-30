@@ -179,6 +179,40 @@ OCR_MIN_TOKEN_LEN = 3   # drop tokens shorter than this; combined with the
                         # has-a-letter rule this removes "ei", "a a", stray glyphs.
 OCR_UPSCALE = 1.5       # upscale factor before thresholding (helps small text)
 
+# ---- Milestone 2: domain lexicon correction (clean noisy OCR) ----
+# Tesseract is *confidently* wrong on the stylised Underground signage in this
+# video ("Metropolite", "Victoria tine", "Southbo", "hotders"). Because the
+# on-screen text is a bounded domain (tube lines, directions, stations, the
+# promo copy), a post-OCR pass snaps each kept token to its nearest lexicon
+# entry by edit-distance ratio. Precision-first: a token is only rewritten when
+# it is long enough, is not already a valid English word in OCR_LEXICON_STOP,
+# and clears OCR_LEXICON_CUTOFF -- so we fix typos without mangling real words.
+OCR_LEXICON_ENABLE = True
+OCR_LEXICON_CUTOFF = 0.75   # min difflib ratio (0-1) to accept a correction
+OCR_LEXICON_MIN_LEN = 4     # only correct tokens with >= this many letters
+OCR_LEXICON = [
+    # tube lines
+    "Bakerloo", "Central", "Circle", "District", "Hammersmith", "Jubilee",
+    "Metropolitan", "Northern", "Piccadilly", "Victoria", "Waterloo",
+    "Elizabeth", "Overground",
+    # directions / platform vocabulary
+    "Northbound", "Southbound", "Eastbound", "Westbound", "Platform", "Line",
+    "Lines", "Underground", "Station", "Exit", "Rail", "Ticket", "Holders",
+    "Only", "Way", "Out",
+    # promo / signage copy seen in this video
+    "London", "Find", "Score", "Credit", "Experian", "Extravaganza", "Forever",
+    "Free", "Now", "Massage", "Massages",
+    # station names seen
+    "Charing", "Cross", "Walthamstow", "Stepney", "Green", "Finchley",
+    "Finsbury", "Blackhorse", "Bethnal", "City", "Road", "Embankment",
+    "Tuesday", "November",
+]
+# real English words that fuzzily collide with the lexicon -- never rewrite these
+OCR_LEXICON_STOP = {
+    "core", "water", "baker", "fore", "wine", "fine", "time", "more", "over",
+    "fire", "care", "bore", "tide", "note", "none", "site", "side", "case",
+}
+
 # ---- Milestone 2: image captioning (BLIP-base) ----
 # Salesforce/blip-image-captioning-base (~990MB). Loaded once, frames streamed
 # one at a time so RAM stays flat (~2-3GB peak) on an 8GB M2. Device "auto" picks
@@ -231,7 +265,8 @@ _STAGE_PARAMS = {
                   "BEST_SHOT_ENABLE", "BEST_SHOT_K", "BEST_SHOT_DIST",
                   "APPEARANCE_ENABLE", "APPEARANCE_DIST", "APPEARANCE_FACE_DIST"],
     "ocr": ["FPS", "OCR_LANG", "OCR_PSM", "OCR_MIN_CONF", "OCR_MIN_TOKEN_LEN",
-            "OCR_UPSCALE"],
+            "OCR_UPSCALE", "OCR_LEXICON_ENABLE", "OCR_LEXICON_CUTOFF",
+            "OCR_LEXICON_MIN_LEN", "OCR_LEXICON"],
     "caption": ["FPS", "CAPTION_MODEL", "CAPTION_MAX_TOKENS", "CAPTION_PROMPT"],
     "metadata": [],     # cheap join; run_pipeline rebuilds it every run (see note)
     "embed": ["TEXT_EMBED_MODEL"],

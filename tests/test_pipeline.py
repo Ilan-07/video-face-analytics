@@ -16,7 +16,7 @@ from recognize import _quality_weight, _robust_template, _link_clusters
 from appearance import body_box
 from search import (search, fmt_ts, _snippet, group_consecutive,
                     _topk_similar)
-from ocr import _keep_token, _filter_tokens
+from ocr import _keep_token, _filter_tokens, _correct_token, correct_tokens
 from build_metadata import caption_echoes_text
 from embed_text import frame_document
 
@@ -352,6 +352,34 @@ def test_filter_tokens_drops_noise_keeps_text():
     toks, kept = _filter_tokens(words, confs)
     assert toks == ["Welcome", "London"]
     assert kept == [95.0, 90.0]
+
+
+# --------------------------------------------------- M2: OCR lexicon correction
+def test_correct_token_fixes_domain_typos():
+    assert _correct_token("Metropolite") == "Metropolitan"
+    assert _correct_token("Southbo") == "Southbound"
+    assert _correct_token("tine") == "line"        # case of the token preserved
+    assert _correct_token("hotders") == "holders"
+
+
+def test_correct_token_preserves_case_and_punctuation():
+    assert _correct_token("METROPOLITE") == "METROPOLITAN"   # all caps
+    assert _correct_token("metropolite") == "metropolitan"   # all lower
+    assert _correct_token("Cregit,") == "Credit,"            # trailing punct
+
+
+def test_correct_token_leaves_correct_and_real_words_alone():
+    assert _correct_token("Victoria") == "Victoria"   # already in lexicon
+    assert _correct_token("platform") == "platform"   # already in lexicon
+    assert _correct_token("Water") == "Water"         # stoplisted real word
+    assert _correct_token("the") == "the"             # below min length
+
+
+def test_correct_tokens_preserves_token_count():
+    toks = ["Victoria", "tine", "Southbo", "platform"]
+    out = correct_tokens(toks)
+    assert out == ["Victoria", "line", "Southbound", "platform"]
+    assert len(out) == len(toks)
 
 
 # ------------------------------------------------------- M2: caption text-echo

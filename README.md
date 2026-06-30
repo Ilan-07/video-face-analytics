@@ -56,7 +56,7 @@ repository you can query by word or phrase. See
 - **Searchable frame dataset (Milestone 2).** Every frame is OCR'd and captioned,
   and joined with its face IDs into one structured metadata repository that powers
   both keyword and **semantic** (embedding-based) search over the whole video.
-- **Self-checking.** 50 unit tests plus two label-free evaluation harnesses run as
+- **Self-checking.** 54 unit tests plus two label-free evaluation harnesses run as
   part of the pipeline.
 
 ---
@@ -97,7 +97,7 @@ frames of presence), labelled with screen time:
 | Co-occurrence precision (label-free) | 1.0000 |
 | Tracking-continuity recall (label-free) | 0.83 |
 | Frames with OCR text / captions (Milestone 2) | 180 / 1,415 |
-| Unit tests | 50 passing |
+| Unit tests | 54 passing |
 
 Methodology, model choices, and alternatives: `DOCUMENTATION.md`.
 
@@ -117,7 +117,8 @@ Methodology, model choices, and alternatives: `DOCUMENTATION.md`.
    default.
 5. **Analytics** (`analytics.py`) — screen-time, appearances, demographics, montages,
    annotated frames, timeline, `reports/report.html` + `summary.{json,md}`.
-6. **OCR** (`ocr.py`) — Tesseract over every frame, confidence-filtered, → `data/ocr.csv`.
+6. **OCR** (`ocr.py`) — Tesseract over every frame, confidence-filtered and
+   **domain-lexicon corrected** (snaps "Metropolite"→Metropolitan, "tine"→line), → `data/ocr.csv`.
 7. **Captioning** (`caption.py`) — BLIP-base scene captions (Apple MPS / CPU), → `data/captions.csv`.
 8. **Metadata repository** (`build_metadata.py`) — joins frame → face IDs → OCR text
    → caption into `data/frame_metadata.{json,csv}`.
@@ -136,7 +137,11 @@ over every frame so the video can be queried by **what is written or shown** in 
 not just who appears.
 
 - **OCR** (`ocr.py`) extracts visible text per frame with Tesseract. A per-token
-  confidence gate (`OCR_MIN_CONF`) keeps the index clean. → `data/ocr.csv`.
+  confidence gate (`OCR_MIN_CONF`) keeps the index clean, then a **domain-lexicon
+  correction pass** snaps each surviving token to its nearest London-Underground
+  term by edit-distance (e.g. `Metropolite`→`Metropolitan`, `Southbo`→`Southbound`,
+  `Victoria tine`→`Victoria line`) — precision-first, so real words in a stop-list
+  are never rewritten. → `data/ocr.csv`.
 - **Captions** (`caption.py`) generate a descriptive caption per frame with
   **BLIP-base** (`Salesforce/blip-image-captioning-base`), running on Apple **MPS**
   when available. The model loads once and frames stream one-by-one, so it stays
