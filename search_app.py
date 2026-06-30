@@ -29,15 +29,25 @@ if not config.METADATA_JSON.exists():
 
 df = _load()
 
+# Deep-linkable searches: ?q=...&mode=Semantic&captions=1&fuzzy=1&regex=1 seeds
+# the controls, so a result view can be shared or bookmarked.
+qp = st.query_params
+_modes = ["Lexical", "Semantic"]
+_mode_default = qp.get("mode", "Lexical")
+if _mode_default not in _modes:
+    _mode_default = "Lexical"
+
 col_q, col_opt = st.columns([3, 1])
 with col_q:
-    query = st.text_input("Search", placeholder='e.g. "Welcome"')
+    query = st.text_input("Search", value=qp.get("q", ""),
+                          placeholder='e.g. "platform"')
 with col_opt:
-    mode = st.radio("Mode", ["Lexical", "Semantic"], horizontal=True,
+    mode = st.radio("Mode", _modes, index=_modes.index(_mode_default),
+                    horizontal=True,
                     help="Lexical = substring/regex/fuzzy; Semantic = by meaning")
-    also_caps = st.checkbox("Search captions too", value=False)
-    fuzzy = st.checkbox("Fuzzy (tolerate OCR typos)", value=False)
-    use_regex = st.checkbox("Regex", value=False)
+    also_caps = st.checkbox("Search captions too", value=qp.get("captions") == "1")
+    fuzzy = st.checkbox("Fuzzy (tolerate OCR typos)", value=qp.get("fuzzy") == "1")
+    use_regex = st.checkbox("Regex", value=qp.get("regex") == "1")
     cols_per_row = st.slider("Columns", 1, 5, 3)
 
 semantic = mode == "Semantic"

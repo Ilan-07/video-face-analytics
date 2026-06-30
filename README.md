@@ -173,7 +173,31 @@ IDs present and a snippet of the matched text; `--no-group` lists every frame.
 **Semantic** — `search.py "underground train" --semantic` ranks frames by embedding
 similarity, surfacing captions like *"a subway train"* and *"a train coming out of
 the tunnel"* that share **no literal words** with the query. The Streamlit app
-exposes both modes (a Lexical/Semantic toggle) plus the fuzzy/regex/caption options.
+exposes both modes (a Lexical/Semantic toggle) plus the fuzzy/regex/caption options,
+and is **deep-linkable**: the controls seed from URL query params
+(`?q=underground+train&mode=Semantic`), so any result view can be shared or
+bookmarked.
+
+### Milestone 2 in action
+
+**Lexical OCR search** — `Victoria` finds every frame whose on-platform signage
+reads "Victoria line", grouped into time ranges, each frame card showing its
+timestamp, the face IDs present, and the matched OCR text:
+
+![Lexical OCR search in the Streamlit app](screenshots/05_search_lexical.png)
+
+**Semantic search** — `underground train` ranks frames by *meaning*. The top hits are
+captioned *"a subway train"* and *"a train is coming out of the tunnel"* — none of
+which contain the words "underground" or "train" — with their cosine similarity
+scores shown:
+
+![Semantic search in the Streamlit app](screenshots/06_search_semantic.png)
+
+**Command line** — the same search core powers a CLI. Consecutive frames with the
+same text collapse into one time range; `--fuzzy` absorbs OCR typos and `--semantic`
+switches to embedding ranking:
+
+![search.py command-line output](screenshots/07_search_cli.png)
 
 ## Outputs
 
