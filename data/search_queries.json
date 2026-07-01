@@ -1,0 +1,52 @@
+[
+  {
+    "query": "underground train",
+    "relevant_terms": ["subway", "underground", "tube", "metro"],
+    "note": "Synonym bridge: captions say 'subway', query says 'underground'. Deliberately excludes the ubiquitous word 'train' so the metric rewards the synonym match, not a trivial keyword hit."
+  },
+  {
+    "query": "commuters waiting on the platform",
+    "relevant_terms": ["waiting", "passengers", "people", "commuters", "crowd"],
+    "note": "People-specific terms (not the near-ubiquitous 'platform'/'station')."
+  },
+  {
+    "query": "train inside a tunnel",
+    "relevant_terms": ["tunnel"],
+    "note": "Distinctive: only ~56 captions mention a tunnel."
+  },
+  {
+    "query": "person in a suit",
+    "relevant_terms": ["suit"],
+    "note": "Individual-subject query; 'suit' is the distinctive token."
+  },
+  {
+    "query": "woman walking",
+    "relevant_terms": ["woman"],
+    "note": "Gendered-subject query; 'woman' appears in only ~74 captions."
+  },
+  {
+    "query": "station name sign",
+    "relevant_terms": ["sign", "says", "district", "bakerloo", "embankment", "jubilee", "line"],
+    "note": "Bridges to OCR'd signage fused into the frame document."
+  },
+  {
+    "query": "red train carriage",
+    "relevant_terms": ["red"],
+    "note": "Colour query; 'red' is the distinctive token."
+  },
+  {
+    "query": "a crowd of people",
+    "relevant_terms": ["people", "crowd", "group", "passengers", "standing"],
+    "note": "Density/people query; excludes generic scene words."
+  },
+  {
+    "query": "train arriving at the station",
+    "relevant_terms": ["pulling", "stopped", "parked", "arriving", "coming", "into"],
+    "note": "Action-oriented: tests arrival verbs rather than the object 'train'."
+  },
+  {
+    "query": "passengers boarding a subway",
+    "relevant_terms": ["passengers", "boarding", "people", "subway"],
+    "note": "Combined people + subway query."
+  }
+]
