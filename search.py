@@ -166,6 +166,7 @@ def _topk_similar(qvec: np.ndarray, mat: np.ndarray, k: int):
 
 
 _ST_MODEL = None
+_CLIP_MODEL = None
 
 
 def _get_embed_model():
@@ -174,6 +175,14 @@ def _get_embed_model():
         import embed_text
         _ST_MODEL = embed_text.load_model()
     return _ST_MODEL
+
+
+def _get_clip_model():
+    global _CLIP_MODEL
+    if _CLIP_MODEL is None:
+        import embed_image
+        _CLIP_MODEL = embed_image.load_model()
+    return _CLIP_MODEL
 
 
 def semantic_search(query: str, df: pd.DataFrame | None = None,
@@ -196,9 +205,20 @@ def semantic_search(query: str, df: pd.DataFrame | None = None,
     if df is None:
         df = load_metadata()
 
-    data = np.load(config.TEXT_EMB_FILE, allow_pickle=True)
-    mat, frame_ids = data["embeddings"], data["frame_ids"]
     qvec = embed_text.embed_texts(_get_embed_model(), [q])[0]
+    return _rank_by_embedding(config.TEXT_EMB_FILE, qvec, df, top_k, min_score,
+                              field="semantic", cols=cols)
+
+
+def _rank_by_embedding(emb_file, qvec, df, top_k, min_score, field, cols):
+    """Shared core for semantic (text) and visual (CLIP) search: rank frames by
+    cosine similarity of `qvec` to the precomputed index, returning search rows.
+    The per-frame snippet is always the frame's caption+OCR document, so a visual
+    hit still shows what the frame contains."""
+    import embed_text
+
+    data = np.load(emb_file, allow_pickle=True)
+    mat, frame_ids = data["embeddings"], data["frame_ids"]
     idx, scores = _topk_similar(qvec, mat, top_k)
 
     by_id = {int(r.frame_id): r for r in df.itertuples(index=False)}
@@ -218,11 +238,36 @@ def semantic_search(query: str, df: pd.DataFrame | None = None,
             "filename": r.filename,
             "frame_path": str(config.FRAME_DIR / r.filename),
             "face_ids": list(r.face_ids),
-            "field": "semantic",
+            "field": field,
             "score": round(float(sc), 3),
             "snippet": (doc[:80] + "…") if len(doc) > 80 else doc,
         })
     return pd.DataFrame(rows, columns=cols)
+
+
+def visual_search(query: str, df: pd.DataFrame | None = None,
+                  top_k: int | None = None,
+                  min_score: float | None = None) -> pd.DataFrame:
+    """Rank frames by how well their IMAGE matches the query, using the CLIP index
+    from embed_image.py. Unlike semantic_search this does not read the caption, so
+    retrieval is not hostage to caption quality -- "a tunnel" finds tunnel frames
+    whose captions never mention one. Returns the same columns as search(), with
+    `score` = CLIP cosine similarity and `field` = "visual"."""
+    import embed_image
+
+    top_k = config.VISUAL_TOP_K if top_k is None else top_k
+    min_score = config.VISUAL_MIN_SCORE if min_score is None else min_score
+    cols = ["frame_id", "timestamp_sec", "mmss", "filename", "frame_path",
+            "face_ids", "field", "score", "snippet"]
+    q = (query or "").strip()
+    if not q:
+        return pd.DataFrame(columns=cols)
+    if df is None:
+        df = load_metadata()
+
+    qvec = embed_image.embed_query(_get_clip_model(), q)
+    return _rank_by_embedding(config.IMAGE_EMB_FILE, qvec, df, top_k, min_score,
+                              field="visual", cols=cols)
 
 
 def main():
@@ -234,21 +279,25 @@ def main():
     ap.add_argument("--fuzzy", action="store_true",
                     help="fall back to fuzzy matching for OCR typos")
     ap.add_argument("--semantic", action="store_true",
-                    help="rank frames by meaning using text embeddings")
+                    help="rank frames by meaning using text (caption+OCR) embeddings")
+    ap.add_argument("--visual", action="store_true",
+                    help="rank frames by image content using CLIP (caption-free)")
     ap.add_argument("--top-k", type=int, default=None,
-                    help="max results for --semantic (default config.SEMANTIC_TOP_K)")
+                    help="max results for --semantic/--visual")
     ap.add_argument("--no-group", action="store_true",
                     help="list every matching frame instead of time ranges")
     ap.add_argument("--open", action="store_true", dest="open_frames",
                     help="open the matching frames (one per range) in the viewer")
     args = ap.parse_args()
 
-    if args.semantic:
-        res = semantic_search(args.query, top_k=args.top_k)
+    if args.semantic or args.visual:
+        kind = "visual" if args.visual else "semantic"
+        finder = visual_search if args.visual else semantic_search
+        res = finder(args.query, top_k=args.top_k)
         if res.empty:
-            print(f'No frames semantically matched "{args.query}".')
+            print(f'No frames {kind}ally matched "{args.query}".')
             return
-        print(f'Top {len(res)} semantic match(es) for "{args.query}":\n')
+        print(f'Top {len(res)} {kind} match(es) for "{args.query}":\n')
         for r in res.itertuples(index=False):
             faces = ", ".join(r.face_ids) if r.face_ids else "-"
             print(f"  [{r.mmss:>6}]  score={r.score:.3f}  {r.filename}  "

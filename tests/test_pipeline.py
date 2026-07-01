@@ -19,6 +19,8 @@ from search import (search, fmt_ts, _snippet, group_consecutive,
 from ocr import _keep_token, _filter_tokens, _correct_token, correct_tokens
 from build_metadata import caption_echoes_text
 from embed_text import frame_document
+from eval_search import (ocr_jaccard, ocr_matches, is_relevant,
+                         precision_at_k)
 
 
 # ---------------------------------------------------------------- geometry
@@ -463,3 +465,93 @@ def test_metadata_repository_has_task4_fields():
     for field in ("frame_id", "timestamp_sec", "face_ids", "ocr_text", "caption"):
         assert field in r
     assert isinstance(r["face_ids"], list)   # Task 4: Face IDs as a list
+
+
+# ------------------------------------------------- search-quality eval (M2)
+def test_ocr_jaccard_identical_is_one():
+    assert ocr_jaccard("Bakerloo Line", "bakerloo line") == 1.0
+
+
+def test_ocr_jaccard_partial_overlap():
+    # pred captured only one of two true tokens -> Jaccard 0.5
+    assert ocr_jaccard("Platform", "Platform One") == 0.5
+
+
+def test_ocr_jaccard_both_empty_is_one():
+    assert ocr_jaccard("", "") == 1.0
+
+
+def test_ocr_jaccard_ignores_punctuation_and_ampersand():
+    # '&' is non-alphanumeric so 'Hammersmith & City' == 'Hammersmith City'
+    assert ocr_jaccard("Hammersmith & City Line",
+                       "Hammersmith City Line") == 1.0
+
+
+def test_ocr_matches_threshold():
+    assert ocr_matches("a b c", "a b c d", 0.5) is True     # 3/4 = 0.75
+    assert ocr_matches("a", "a b c d", 0.5) is False        # 1/4 = 0.25
+
+
+def test_is_relevant_word_boundary():
+    assert is_relevant("a subway train", ["subway"]) is True
+    # substring-but-not-word should NOT count (avoids 'trainee' matching 'train')
+    assert is_relevant("a group of trainees", ["train"]) is False
+
+
+def test_is_relevant_any_term():
+    assert is_relevant("a woman on a platform", ["man", "woman"]) is True
+    assert is_relevant("an empty tunnel", ["subway", "train"]) is False
+
+
+def test_precision_at_k_counts_relevant_in_topk():
+    docs = ["a subway train", "a station", "the underground", "a man", "a sign"]
+    # relevant = mentions subway/underground -> docs 0 and 2 -> 2/5
+    assert precision_at_k(docs, ["subway", "underground"], 5) == pytest.approx(0.4)
+
+
+def test_precision_at_k_respects_k():
+    docs = ["a subway", "a subway", "a man", "a man"]
+    assert precision_at_k(docs, ["subway"], 2) == 1.0        # top-2 both relevant
+
+
+def test_precision_at_k_empty_is_zero():
+    assert precision_at_k([], ["subway"], 5) == 0.0
+
+
+# ------------------------------------------------- caption echo-fix (M2)
+def test_caption_echo_is_detected():
+    # a bare title-card echo (caption == the OCR text) must be flagged
+    assert caption_echoes_text("bakerloo line", "Bakerloo Line") is True
+
+
+def test_echo_fix_fallback_is_not_reflagged():
+    # the repaired fallback caption must NOT re-echo, or the fix would loop and
+    # re-run the model on every pipeline pass (idempotency regression guard).
+    fixed = "a title card that reads: Northern Line"
+    assert caption_echoes_text(fixed, "Northern Line") is False
+
+
+def test_scene_caption_is_not_flagged_as_echo():
+    assert caption_echoes_text("a subway train at a platform",
+                               "Bakerloo Line") is False
+
+
+# ------------------------------------------------- visual (CLIP) search (M2)
+def test_visual_and_semantic_share_columns():
+    from search import visual_search, semantic_search
+    # empty query returns the empty frame with the canonical column set
+    vcols = list(visual_search("").columns)
+    scols = list(semantic_search("").columns)
+    assert vcols == scols
+    assert "score" in vcols and "field" in vcols
+
+
+def test_visual_search_ranks_descending():
+    import config
+    from search import visual_search
+    if not config.IMAGE_EMB_FILE.exists():
+        pytest.skip("CLIP image index not built yet")
+    res = visual_search("a subway train", top_k=5, min_score=0.0)
+    scores = res["score"].tolist()
+    assert scores == sorted(scores, reverse=True)
+    assert (res["field"] == "visual").all()

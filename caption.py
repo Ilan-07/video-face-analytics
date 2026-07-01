@@ -21,6 +21,7 @@ from tqdm import tqdm
 
 import config
 import util
+from build_metadata import caption_echoes_text
 
 log = util.get_logger()
 
@@ -54,8 +55,8 @@ def _load_model():
     return proc, model, device
 
 
-def _caption_batch(proc, model, device, images) -> list[str]:
-    text = config.CAPTION_PROMPT or None
+def _caption_batch(proc, model, device, images, prompt=None) -> list[str]:
+    text = (config.CAPTION_PROMPT if prompt is None else prompt) or None
     if text:
         inputs = proc(images=images, text=[text] * len(images),
                       return_tensors="pt").to(device)
@@ -63,6 +64,51 @@ def _caption_batch(proc, model, device, images) -> list[str]:
         inputs = proc(images=images, return_tensors="pt").to(device)
     out = model.generate(**inputs, max_new_tokens=config.CAPTION_MAX_TOKENS)
     return [proc.decode(o, skip_special_tokens=True).strip() for o in out]
+
+
+def _fix_echoes(captions: dict[int, str], ocr_map: dict[int, str],
+                get_model, fname: dict[int, str]) -> int:
+    """Repair captions that merely echo a title card's OCR text.
+
+    Re-captions each echoing frame with CAPTION_RECAPTION_PROMPT to bias the model
+    toward describing the scene; if the result STILL echoes (a pure text card with
+    no scene), falls back to the frame's clean OCR text. Mutates `captions` in
+    place, returns the number of frames repaired."""
+    echo_ids = [fid for fid, cap in captions.items()
+                if caption_echoes_text(cap, ocr_map.get(fid, ""))]
+    if not echo_ids:
+        return 0
+    log.info("echo-fix: re-captioning %d title-card frame(s) (prompt=%r)",
+             len(echo_ids), config.CAPTION_RECAPTION_PROMPT)
+    proc, model, device = get_model()
+    n_recap = n_fallback = 0
+    for fid in tqdm(echo_ids, desc="echo-fix"):
+        try:
+            img = Image.open(config.FRAME_DIR / fname[fid]).convert("RGB")
+        except (OSError, FileNotFoundError, KeyError):
+            continue
+        recap = _caption_batch(proc, model, device, [img],
+                               prompt=config.CAPTION_RECAPTION_PROMPT)[0]
+        img.close()
+        # BLIP echoes the conditioning prompt back at the start; drop it so the
+        # stored caption reads naturally ("a black background..." not "a photo of
+        # a black background...").
+        prefix = config.CAPTION_RECAPTION_PROMPT.strip()
+        if prefix and recap.lower().startswith(prefix.lower()):
+            recap = recap[len(prefix):].strip() or recap
+        ocr = ocr_map.get(fid, "")
+        if caption_echoes_text(recap, ocr):
+            # Pure title card: describe it AS a text card and carry the clean OCR
+            # text. The wrapper keeps token-overlap below the echo threshold, so
+            # this repaired caption is not re-flagged (or re-fixed) on a rerun.
+            captions[fid] = f"a title card that reads: {ocr}"
+            n_fallback += 1
+        else:
+            captions[fid] = recap          # improved scene description
+            n_recap += 1
+    log.info("echo-fix: %d re-captioned, %d fell back to OCR text",
+             n_recap, n_fallback)
+    return n_recap + n_fallback
 
 
 def _existing_captions(restart: bool) -> dict[int, str]:
@@ -103,8 +149,17 @@ def run(limit: int | None = None, restart: bool = False) -> int:
              len(rows), len(rows) - len(todo), len(todo), config.CAPTION_PROMPT)
 
     captions = dict(cached)
+    fname = {int(r.frame_id): r.filename for r in rows}
+    _state = {}                       # lazily-loaded (proc, model, device)
+
+    def get_model():
+        if not _state:
+            proc, model, device = _load_model()
+            _state.update(proc=proc, model=model, device=device)
+        return _state["proc"], _state["model"], _state["device"]
+
     if todo:
-        proc, model, device = _load_model()
+        proc, model, device = get_model()
         bs = max(1, config.CAPTION_BATCH)
         for i in tqdm(range(0, len(todo), bs), desc="caption"):
             chunk = todo[i:i + bs]
@@ -123,6 +178,10 @@ def run(limit: int | None = None, restart: bool = False) -> int:
                 captions[int(r.frame_id)] = cap
             for im in imgs:
                 im.close()
+
+    # Repair title-card echoes (loads the model on demand if it wasn't already).
+    if config.CAPTION_ECHO_FIX:
+        _fix_echoes(captions, ocr_map, get_model, fname)
 
     n = 0
     with open(config.CAPTIONS_CSV, "w", newline="") as f:

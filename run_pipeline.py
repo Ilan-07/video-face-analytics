@@ -115,6 +115,15 @@ def main():
     else:
         log.info("[skip] semantic index already built")
 
+    # 9.5 Visual (CLIP) index  (image-native search; rerun if frames or the CLIP
+    #     model changed -- independent of caption/OCR text).
+    if ran or _stale("embed_image", [config.IMAGE_EMB_FILE], args.force):
+        import embed_image
+        embed_image.run()
+        _stamp("embed_image")
+    else:
+        log.info("[skip] visual index already built")
+
     # 10. Evaluation (Fix #3)
     if not args.no_eval:
         import eval as evaluation

@@ -227,6 +227,13 @@ CAPTION_PROMPT = ""         # optional conditioning text (e.g. "a photo of"). Em
 # scene description; build_metadata flags such captions when their token overlap
 # with the OCR text is at/above this Jaccard ratio.
 CAPTION_TEXT_ECHO_JACCARD = 0.5
+# Echo repair: after the first pass, frames whose caption echoes the OCR text are
+# re-captioned with CAPTION_RECAPTION_PROMPT (conditioning BLIP toward describing
+# the scene instead of reading the text). If the re-caption STILL echoes -- a pure
+# title card with no scene to describe -- we fall back to the clean OCR text, so
+# the search document carries the real signal instead of a garbled transcription.
+CAPTION_ECHO_FIX = True
+CAPTION_RECAPTION_PROMPT = "a photo of"
 
 # ---- Milestone 2: semantic search (text embeddings) ----
 # Each frame's searchable text (caption + OCR text) is embedded with a compact
@@ -237,6 +244,31 @@ TEXT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 TEXT_EMBED_DEVICE = "auto"      # "auto" | "mps" | "cpu" | "cuda"
 SEMANTIC_TOP_K = 20            # default max results for a semantic query
 SEMANTIC_MIN_SCORE = 0.20     # drop matches below this cosine similarity
+
+# ---- Milestone 2: visual (CLIP) search ----
+# A second, image-native search path so retrieval is NOT hostage to caption
+# quality. CLIP embeds every frame IMAGE and the query TEXT into one shared space
+# (embed_image.py builds the index), so "a tunnel" can match a tunnel frame even
+# when its caption never says "tunnel". clip-ViT-B-32 (~600MB) via
+# sentence-transformers encodes both images and text. CLIP cosine similarities run
+# lower than text-to-text, hence the smaller default floor.
+CLIP_MODEL = "clip-ViT-B-32"
+CLIP_DEVICE = "auto"           # "auto" | "mps" | "cpu" | "cuda"
+IMAGE_EMB_FILE = EMB_DIR / "image_embeddings.npz"
+VISUAL_TOP_K = 20              # default max results for a visual query
+VISUAL_MIN_SCORE = 0.20        # drop matches below this CLIP cosine similarity
+
+# ---- Milestone 2: search-quality evaluation ----
+# make_search_labelsheet.py samples frames into SEARCH_LABELS_CSV for a human to
+# fill (true OCR text + a 1-5 caption-adequacy score); eval_search.py scores OCR
+# precision/recall, mean caption adequacy, and semantic precision@k over the
+# curated query set in SEARCH_QUERIES_JSON. See those modules for the schema.
+SEARCH_LABELS_CSV = DATA / "search_labels.csv"
+SEARCH_QUERIES_JSON = DATA / "search_queries.json"
+SEARCH_LABEL_SAMPLE = 30      # frames sampled into the OCR/caption labelsheet
+OCR_MATCH_JACCARD = 0.5       # token-Jaccard >= this counts a predicted OCR
+                              # string as matching the human-labeled true text
+SEARCH_EVAL_K = 5             # k for semantic precision@k
 
 # InsightFace model bundle (SCRFD detector + ArcFace recog + gender/age)
 MODEL_PACK = "buffalo_l"
@@ -267,9 +299,12 @@ _STAGE_PARAMS = {
     "ocr": ["FPS", "OCR_LANG", "OCR_PSM", "OCR_MIN_CONF", "OCR_MIN_TOKEN_LEN",
             "OCR_UPSCALE", "OCR_LEXICON_ENABLE", "OCR_LEXICON_CUTOFF",
             "OCR_LEXICON_MIN_LEN", "OCR_LEXICON"],
-    "caption": ["FPS", "CAPTION_MODEL", "CAPTION_MAX_TOKENS", "CAPTION_PROMPT"],
+    "caption": ["FPS", "CAPTION_MODEL", "CAPTION_MAX_TOKENS", "CAPTION_PROMPT",
+                "CAPTION_ECHO_FIX", "CAPTION_RECAPTION_PROMPT",
+                "CAPTION_TEXT_ECHO_JACCARD"],
     "metadata": [],     # cheap join; run_pipeline rebuilds it every run (see note)
     "embed": ["TEXT_EMBED_MODEL"],
+    "embed_image": ["FPS", "CLIP_MODEL"],
 }
 
 
