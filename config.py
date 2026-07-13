@@ -270,13 +270,99 @@ OCR_MATCH_JACCARD = 0.5       # token-Jaccard >= this counts a predicted OCR
                               # string as matching the human-labeled true text
 SEARCH_EVAL_K = 5             # k for semantic precision@k
 
+# ---- Milestone 3: scene segmentation ----
+# The captions cannot segment this video: 1415 frames yield only 342 unique
+# caption strings and BLIP flickers between synonyms on visually identical
+# frames ("a train is pulling passengers" x72), so consecutive-run grouping
+# gives 904 fragments -- noise, not scene cuts. Instead we cut on adjacent-frame
+# CLIP cosine (image_embeddings.npz, already L2-normalized, so a plain dot
+# product). Measured on this video: mean 0.959, p5 0.858, p1 0.491 -- the ten
+# sharpest cuts land exactly on the Tube-line title cards, so the visual and
+# textual signals agree independently.
+SCENES_JSON = DATA / "scenes.json"
+SCENE_SIM_THRESH = 0.70   # adjacent cosine below this = cut. Swept 0.60/0.70/
+                          # 0.75/0.80 -> 26/36/39/40 scenes. 0.60 is too coarse:
+                          # it swallows the station-name sign that opens each
+                          # line (Embankment, Temple, Finsbury Park...), which is
+                          # the video's actual editorial beat. 0.75+ buys only a
+                          # few more scenes and starts cutting on camera shake.
+SCENE_MIN_SEC = 4.0       # scenes shorter than this merge into the previous one.
+                          # A safety net that currently never fires: every short
+                          # scene is a protected title-card or station-sign beat.
+SCENE_TITLE_CARD_FORCE = True   # always cut at a title card, whatever the cosine
+
+# In-carriage advertising is genuinely on screen but tells a story about adverts,
+# not about the Underground. scenes.is_signage() drops any OCR string containing
+# one of these, so the narrator never reads "Now FREE FOREVER" as a station name.
+# Distinct from OCR_LEXICON_STOP, which guards the M2 fuzzy-correction pass.
+SCENE_OCR_STOPWORDS = {
+    "experian", "credit", "score", "free", "forever", "find", "now",
+    "massage", "massages", "ticket", "holders", "only", "awesome",
+}
+
+# ---- Milestone 3: narration (OpenRouter / Gemma 4) ----
+# gemma-4-31b-it has a 262k context, so all ~30 scene digests fit in ONE prompt
+# and chronological coherence is structural rather than stitched from chunks.
+# Apache-2.0, and the ":free" variant costs nothing (20 RPM / 50 req-day without
+# credits). It also takes image input, which describe_scenes.py uses to build an
+# independent reference for eval_story.py's grounding metric.
+LLM_CACHE_DIR = DATA / "llm_cache"
+SCENE_DESC_JSON = DATA / "scene_descriptions.json"
+STORY_JSON = DATA / "story.json"
+TIMELINE_JSON = DATA / "timeline.json"
+
+NARRATE_MODEL = "google/gemma-4-31b-it:free"
+NARRATE_BASE_URL = "https://openrouter.ai/api/v1"
+NARRATE_TEMPERATURE = 0.0   # deterministic: the prompt comparison must reproduce
+NARRATE_SEED = 0
+NARRATE_MAX_TOKENS = 4096   # the ":free" variant caps completions at 8192
+NARRATE_TIMEOUT = 120       # seconds per request
+NARRATE_MAX_RETRIES = 20    # exponential backoff on HTTP 429. Measured on the
+NARRATE_RETRY_MAX_DELAY = 60  # ":free" pool: a big text request succeeds ~1 try in
+                              # 3, so 20 attempts fail ~0.03% of the time. These
+                              # 429s are upstream capacity ("temporarily
+                              # rate-limited upstream"), NOT our 50/day quota, so
+                              # retrying costs nothing. Two providers back the
+                              # model: OpenInference (text only) and Google AI
+                              # Studio (the only one that accepts images, and the
+                              # one every free user's vision request queues for).
+NARRATE_IMAGE_MAX_SIDE = 896  # downscale keyframes before base64. Gemma 4 resizes
+                              # to 896px internally, so sending 1280px originals
+                              # (318KB each) only inflates the payload -- 6 images
+                              # went 2.6MB -> ~0.4MB, which also makes the request
+                              # far likelier to survive a congested free endpoint.
+NARRATE_CACHE = True        # replay data/llm_cache/*.json instead of re-calling
+NARRATE_VLM_ENABLE = True   # keyframe re-captioning (ablation + eval reference)
+NARRATE_VLM_BATCH = 6       # keyframes per vision request. Gemma 4 accepts many
+                            # images per message, and the ":free" tier allows only
+                            # 50 requests/day: batching 24 keyframes 6-at-a-time
+                            # costs 4 requests instead of 24, so the whole
+                            # milestone runs in 11 and leaves room to iterate.
+                            # 6 keyframes ~= 2.6MB of base64 -- comfortably inside
+                            # the 262k context. Larger batches risk the model
+                            # losing track of which description belongs to which
+                            # image, which the scene_index contract then catches.
+
+# Prompt-engineering comparison (Task 3). Each strategy generates its own story
+# into reports/story_<strategy>.md; eval_story.py scores them side by side.
+STORY_STRATEGIES = ["zero_shot", "few_shot", "chain_of_thought", "structured_role"]
+STORY_STRATEGY = "structured_role"   # the one promoted to data/story.json
+
+# ---- Milestone 3: story evaluation ----
+# eval_story.py scores each strategy on chronology (are cited timestamps
+# monotonic?), grounding (are content words attested in the scene digests /
+# VLM descriptions?), chapter coverage, and redundancy.
+STORY_EVAL_NGRAM = 3          # n for the distinct-n-gram redundancy ratio
+STORY_GROUND_MIN_LEN = 4      # ignore content words shorter than this
+VIDEO_DURATION_SEC = 1415.5   # upper bound for timeline timestamp validation
+
 # InsightFace model bundle (SCRFD detector + ArcFace recog + gender/age)
 MODEL_PACK = "buffalo_l"
 
 
 def ensure_dirs() -> None:
     for d in (VIDEO_DIR, FRAME_DIR, FACE_DIR, EMB_DIR,
-              REPORT_DIR, MONTAGE_DIR, ANNOT_DIR):
+              REPORT_DIR, MONTAGE_DIR, ANNOT_DIR, LLM_CACHE_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -305,6 +391,13 @@ _STAGE_PARAMS = {
     "metadata": [],     # cheap join; run_pipeline rebuilds it every run (see note)
     "embed": ["TEXT_EMBED_MODEL"],
     "embed_image": ["FPS", "CLIP_MODEL"],
+    "scenes": ["FPS", "CLIP_MODEL", "SCENE_SIM_THRESH", "SCENE_MIN_SEC",
+               "SCENE_TITLE_CARD_FORCE"],
+    "describe": ["NARRATE_MODEL", "NARRATE_VLM_ENABLE", "NARRATE_VLM_BATCH",
+                 "SCENE_SIM_THRESH", "SCENE_MIN_SEC", "SCENE_TITLE_CARD_FORCE"],
+    "narrate": ["NARRATE_MODEL", "NARRATE_TEMPERATURE", "NARRATE_SEED",
+                "NARRATE_MAX_TOKENS", "STORY_STRATEGIES", "STORY_STRATEGY",
+                "SCENE_SIM_THRESH", "SCENE_MIN_SEC"],
 }
 
 

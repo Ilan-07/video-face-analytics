@@ -18,3 +18,8 @@ torch>=2.2.0
 pillow>=10.0.0
 streamlit>=1.33.0
 sentence-transformers>=2.6.0
+
+# Milestone 3: story / summary / timeline via OpenRouter (Gemma 4).
+# The OpenRouter endpoint is OpenAI-compatible, so plain HTTP is enough — no SDK.
+# NOTE: generating needs OPENROUTER_API_KEY; replaying data/llm_cache/ does not.
+requests>=2.31.0

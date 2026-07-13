@@ -1,0 +1,18 @@
+{
+  "model": "google/gemma-4-31b-it:free",
+  "prompt": "You are shown 6 frames from a London Underground tour video. They are in chronological order and correspond, in order, to these scenes:\n\n  image 1: scene_index 2, at 0:09 (Bakerloo Line)\n  image 2: scene_index 3, at 0:12 (Bakerloo Line)\n  image 3: scene_index 4, at 1:08 (Bakerloo Line)\n  image 4: scene_index 6, at 2:21 (Central Line)\n  image 5: scene_index 7, at 2:24 (Central Line)\n  image 6: scene_index 9, at 4:41 (Circle Line)\n\nFor EACH image, describe what is actually visible in 2-3 sentences. Be concrete. State the setting (platform, tunnel, train interior, escalator, concourse), whether a train is present and whether its doors are open, how many people are visible and what they are doing, and any station name or signage you can read.\n\nDescribe only what you can see. If there is no train in a frame, say so explicitly. Do not speculate about what happens before or after.\n\nReturn ONLY a JSON array, no prose and no code fence. One object per image, in the same order, each with exactly two keys:\n  \"scene_index\"  - the integer scene number from the list above\n  \"description\"  - your 2-3 sentence description of that image",
+  "params": {
+    "max_tokens": 1800,
+    "temperature": 0.0,
+    "seed": 0
+  },
+  "images": [
+    "ece4f310f0ef7df4@896",
+    "8d65061eda639837@896",
+    "024a683e87ced888@896",
+    "11a9d01817fcfa4d@896",
+    "1b9f6aedc1eb5de5@896",
+    "249a8386509182e4@896"
+  ],
+  "response": "[\n  {\n    \"scene_index\": 2,\n    \"description\": \"A close-up shot of a station sign on a white wall. The sign is a red circle with a blue horizontal bar across the center that reads 'EMBANKMENT' in white capital letters.\"\n  },\n  {\n    \"scene_index\": 3,\n    \"description\": \"A view of a platform at Embankment station with a train present and its doors closed. One woman stands in the foreground facing the train, and two other people are visible further down the platform.\"\n  },\n  {\n    \"scene_index\": 4,\n    \"description\": \"A view of a platform at Embankment station with a train present and its doors closed. No people are visible on the platform, and a poster for 'PETE TONG' is visible on the right wall.\"\n  },\n  {\n    \"scene_index\": 6,\n    \"description\": \"A close-up shot of a station sign on a white tiled wall. The sign is a red circle with a blue horizontal bar across the center that reads 'BETHNAL GREEN' in white capital letters.\"\n  },\n  {\n    \"scene_index\": 7,\n    \"description\": \"A view of a platform at Bethnal Green station with a train present and its doors open. Two people are walking further down the platform, and several colorful advertisements are visible on the left wall.\"\n  },\n  {\n    \"scene_index\": 9,\n    \"description\": \"A close-up shot of a station sign on a white tiled wall. The sign is a red circle with a blue horizontal bar across the center that reads 'TEMPLE' in white capital letters.\"\n  }\n]"
+}

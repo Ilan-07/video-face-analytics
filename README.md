@@ -97,7 +97,10 @@ frames of presence), labelled with screen time:
 | Co-occurrence precision (label-free) | 1.0000 |
 | Tracking-continuity recall (label-free) | 0.83 |
 | Frames with OCR text / captions (Milestone 2) | 180 / 1,415 |
-| Unit tests | 54 passing |
+| Scenes / chapters (Milestone 3) | 36 / 12 |
+| Story chronology · timeline events (Milestone 3) | 1.00 · 35 |
+| Caption adequacy vs. vision — BLIP's ceiling (Milestone 3) | 0.11 |
+| Unit tests | 97 passing |
 
 Methodology, model choices, and alternatives: `DOCUMENTATION.md`.
 
@@ -204,6 +207,77 @@ switches to embedding ranking:
 
 ![search.py command-line output](screenshots/07_search_cli.png)
 
+## Milestone 3: story, summary & event timeline
+
+Milestone 3 builds *higher-level understanding* on top of the per-frame dataset: a
+chronological **story**, an overall **summary**, an **event timeline**, and three
+new metadata fields (`scene_index`, `story_segment`, `event_description`).
+
+The obstacle is that the captions cannot be narrated as-is. Across 1,415 frames
+BLIP produces only **342 distinct captions** and flickers between synonyms on
+identical frames (*"a train is pulling passengers"* ×72), so naively collapsing
+repeats yields 904 fragments — noise, not scene structure. The pipeline therefore
+compresses the video into **~36 scene digests** first, then narrates from those.
+
+**Scene segmentation (`scenes.py`, offline).** Adjacent-frame CLIP cosine over the
+Milestone 2 image index cuts the video where the picture changes; a title-card
+detector forces a hard cut at each Underground-line card. Two independent signals
+agree — the sharpest cosine drops land exactly on the title cards — recovering the
+video's authored structure: an intro plus 11 lines (Bakerloo → Waterloo & City).
+Each scene stores its span, face IDs, station signage, and a **CLIP-medoid
+keyframe**.
+
+**Narration (`narrate.py` → Gemma 4 via OpenRouter).** All ~36 digests fit in one
+262k-context prompt, so the story is generated in a single pass and chronological
+coherence is structural, not stitched. Four prompt strategies are compared
+(`zero_shot`, `few_shot`, `chain_of_thought`, `structured_role`) and scored by
+`eval_story.py`. The timeline is *validated, not trusted*: timestamps must parse,
+lie in range, and run forwards, else they are repaired or fall back to scene
+boundaries.
+
+**Grounding & the caption ceiling (`describe_scenes.py`).** Gemma 4 also
+re-describes each scene's keyframe from the *image*. This is an independent
+reference for scoring hallucination — and it quantifies BLIP's ceiling: across 24
+keyframes, BLIP's caption captures only **11%** of the content words the vision
+model reads in the same frame, and **every** scene falls below 25%. An ablation
+story narrated from the richer descriptions confirms the narrator was never the
+bottleneck; the captions were.
+
+Every model response is cached to `data/llm_cache/` (the one part of `data/` that
+is committed), so `pytest` and `eval_story.py` **replay offline with no API key** —
+the repo keeps its reproducible-on-a-fresh-clone guarantee.
+
+### Milestone 3 evaluation
+
+Scored by `eval_story.py` over the four prompt strategies (all narrating the same
+digests):
+
+| Strategy | Chronology | Chapter coverage | Redundancy (distinct-3-gram) | Grounding vs. VLM |
+|----------|-----------|------------------|------------------------------|-------------------|
+| `zero_shot` | 1.00 | 1.00 | 0.87 | 0.36 |
+| `few_shot` | 1.00 | 0.92 | 0.69 | 0.46 |
+| `chain_of_thought` | 1.00 | 1.00 | 0.87 | 0.35 |
+| `structured_role` | 1.00 | 0.92 | 0.97 | 0.26 |
+
+Every strategy is perfectly chronological (Task 2, *verified* not asserted). The
+strategies trade off differently — `structured_role` is the least repetitive,
+`few_shot` the best-grounded — the honest finding being that **prompt engineering
+moves chronology and redundancy, but only better captions move grounding**
+(ablation: 0.26 → 0.36 when narrating from the vision descriptions). The event
+timeline is 35 events, 100% within real scene spans, strictly chronological.
+
+### Milestone 3 in action
+
+**Story & summary** — the Streamlit app's new *Story & Timeline* tab renders the
+one-pass summary and the chaptered story, one section per Underground line:
+
+![Generated story and summary in the Streamlit app](screenshots/08_story.png)
+
+**Event timeline** — each event shows its timestamp, the line it belongs to, and
+the scene's keyframe — black title cards, station roundels, and platform footage:
+
+![Event timeline with keyframes](screenshots/09_timeline.png)
+
 ## Outputs
 
 After a run, results land in `reports/` and `data/`:
@@ -220,8 +294,15 @@ After a run, results land in `reports/` and `data/`:
 | annotated frames / montages | Boxes + Face IDs, one representative crop per identity. |
 | `data/ocr.csv` | Per-frame OCR text + face IDs, token count, mean confidence (Milestone 2). |
 | `data/captions.csv` | Per-frame BLIP caption + face IDs + OCR text (Milestone 2). |
-| `data/frame_metadata.{json,csv}` | Frame → timestamp → face IDs → OCR text → caption (+ text-echo flag) (Milestone 2). |
+| `data/frame_metadata.{json,csv}` | Frame → timestamp → face IDs → OCR → caption → **scene_index → story_segment → event_description** (M2 + M3 Task 4). |
 | `data/embeddings/text_embeddings.npz` | Normalized caption+OCR text vectors for semantic search (Milestone 2). |
+| `data/scenes.json` | ~36 scene digests: span, chapter, face IDs, signage, CLIP-medoid keyframe (Milestone 3). |
+| `data/story.json` / `reports/story_*.md` | Chaptered story + summary; one `.md` per prompt strategy (Milestone 3). |
+| `data/timeline.json` / `reports/timeline.md` | Event timeline — validated `(timestamp, description)` pairs (Milestone 3). |
+| `data/scene_descriptions.json` | Gemma-4 vision description per scene keyframe — grounding reference (Milestone 3). |
+| `data/llm_cache/` | Committed LLM responses so narration + eval replay offline, no API key (Milestone 3). |
+| `reports/eval_story.{json,md}` / `STORY_COMPARISON.md` | Prompt-strategy scores + side-by-side stories (Milestone 3). |
+| `reports/video_summary.md` | The generated video summary (Milestone 3). |
 
 ## Setup
 ```bash
@@ -232,6 +313,20 @@ Requires `ffmpeg` on PATH. Face inference is CPU-only by default
 (`CPUExecutionProvider`); a GPU `onnxruntime` provider is optional. The Milestone 2
 OCR stage needs the **Tesseract** binary (`brew install tesseract` on macOS); the
 captioning stage uses Apple **MPS** automatically when available, else CPU.
+
+### Milestone 3: narration API key
+Story/summary/timeline generation calls Gemma 4 through OpenRouter. The committed
+`data/llm_cache/` means **you only need a key to regenerate** — `pytest`,
+`eval_story.py`, and the Streamlit tab all replay the cached responses offline. To
+regenerate, create a free key at <https://openrouter.ai/keys>, enable free
+endpoints at <https://openrouter.ai/settings/privacy>, and drop it in a gitignored
+`.env`:
+```bash
+echo 'OPENROUTER_API_KEY=sk-or-...' > .env    # never committed
+```
+The `:free` vision endpoint is a shared pool; if it is rate-limited, register a
+free [Google AI Studio](https://aistudio.google.com/apikey) key under OpenRouter's
+integrations to bill vision calls against your own quota.
 
 ### Optional: cross-scene clothing re-ID
 An orthogonal appearance signal (same outfit across scenes) that consolidates a person
@@ -248,6 +343,13 @@ dependencies and is recommended only with the human review step:
 .venv/bin/python run_pipeline.py --force    # rerun every stage
 .venv/bin/python run_pipeline.py --no-eval  # skip the eval harness
 .venv/bin/python preview_faces.py           # live detection overlay while the video plays
+
+# Milestone 3 stages can also be run standalone:
+.venv/bin/python scenes.py                  # segment into scenes (offline, no key)
+.venv/bin/python describe_scenes.py         # VLM keyframe descriptions (needs key)
+.venv/bin/python narrate.py --strategy all  # all four story strategies + summary + timeline
+.venv/bin/python eval_story.py              # score the stories (offline, replays cache)
+.venv/bin/python -m streamlit run search_app.py   # Search + Story & Timeline UI
 ```
 
 ## Tests
@@ -255,8 +357,10 @@ dependencies and is recommended only with the human review step:
 .venv/bin/python -m pytest -q
 ```
 The suite covers the pure logic — IoU geometry, blur/pose scoring, the ByteTrack
-birth-frame reconciliation, the evaluation metrics, and the Milestone 2 search core
-plus metadata-schema checks — so refactors stay honest.
+birth-frame reconciliation, the evaluation metrics, the Milestone 2 search core, and
+the Milestone 3 scene cuts, title-card detection, timeline validation, and story
+scoring — plus artifact-schema checks. It runs green offline with **no API key**
+(the committed LLM cache replays), so refactors stay honest.
 
 ## Key tuning (`config.py`)
 - `FPS` — sampling rate (1 FPS per the project spec).
@@ -272,8 +376,10 @@ plus metadata-schema checks — so refactors stay honest.
 download.py          extract_frames.py   detect_faces.py    recognize.py
 analytics.py         appearance.py       run_pipeline.py    preview_faces.py
 ocr.py               caption.py          build_metadata.py  embed_text.py
-search.py            search_app.py       config.py          util.py
-eval.py              eval_cooccurrence.py eval_continuity.py eval_detection.py
+embed_image.py       search.py           search_app.py      config.py
+util.py              eval.py             eval_search.py     eval_cooccurrence.py
+scenes.py            llm.py              describe_scenes.py narrate.py       # Milestone 3
+eval_story.py                                                               # Milestone 3
 tests/               screenshots/        requirements.txt   DOCUMENTATION.md
 requirements-appearance.txt
 ```

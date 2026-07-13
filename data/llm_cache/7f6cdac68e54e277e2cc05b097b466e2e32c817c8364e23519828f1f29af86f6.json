@@ -1,0 +1,18 @@
+{
+  "model": "google/gemma-4-31b-it:free",
+  "prompt": "You are shown 6 frames from a London Underground tour video. They are in chronological order and correspond, in order, to these scenes:\n\n  image 1: scene_index 10, at 4:45 (Circle Line)\n  image 2: scene_index 12, at 5:52 (District Line)\n  image 3: scene_index 13, at 5:54 (District Line)\n  image 4: scene_index 15, at 8:57 (Hammersmith City Line)\n  image 5: scene_index 16, at 9:00 (Hammersmith City Line)\n  image 6: scene_index 18, at 10:13 (Jubilee Line)\n\nFor EACH image, describe what is actually visible in 2-3 sentences. Be concrete. State the setting (platform, tunnel, train interior, escalator, concourse), whether a train is present and whether its doors are open, how many people are visible and what they are doing, and any station name or signage you can read.\n\nDescribe only what you can see. If there is no train in a frame, say so explicitly. Do not speculate about what happens before or after.\n\nReturn ONLY a JSON array, no prose and no code fence. One object per image, in the same order, each with exactly two keys:\n  \"scene_index\"  - the integer scene number from the list above\n  \"description\"  - your 2-3 sentence description of that image",
+  "params": {
+    "max_tokens": 1800,
+    "temperature": 0.0,
+    "seed": 0
+  },
+  "images": [
+    "776c25c19affdec8@896",
+    "224f9685d2a81899@896",
+    "8809f58520a3b49f@896",
+    "b85a9ad7af1adc71@896",
+    "5a0050e10b3ed30b@896",
+    "a019f4f8189c20cd@896"
+  ],
+  "response": "[\n  {\n    \"scene_index\": 10,\n    \"description\": \"A train is stopped at a platform with its doors closed. Several passengers are visible inside the train carriages. No people are on the platform.\"\n  },\n  {\n    \"scene_index\": 12,\n    \"description\": \"A close-up shot of a station sign on a white brick wall. The sign is a red circle with a blue bar across it reading 'STEPNEY GREEN'.\"\n  },\n  {\n    \"scene_index\": 13,\n    \"description\": \"A train is stopped at a platform with its doors closed. About seven people are visible on the platform, some walking and one standing still.\"\n  },\n  {\n    \"scene_index\": 15,\n    \"description\": \"A train is stopped at a platform with its doors open. One person is stepping off the train, and two people are visible sitting inside the carriage.\"\n  },\n  {\n    \"scene_index\": 16,\n    \"description\": \"A close-up shot of a station sign on a white tiled wall. The sign is a red circle with a blue bar across it reading 'SWISS COTTAGE'.\"\n  },\n  {\n    \"scene_index\": 18,\n    \"description\": \"A train is stopped at a platform with its doors open. One person is stepping off the train, and two people are visible sitting inside the carriage.\"\n  }\n]"
+}

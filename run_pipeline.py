@@ -117,14 +117,71 @@ def main():
 
     # 9.5 Visual (CLIP) index  (image-native search; rerun if frames or the CLIP
     #     model changed -- independent of caption/OCR text).
+    img_ran = False
     if ran or _stale("embed_image", [config.IMAGE_EMB_FILE], args.force):
         import embed_image
         embed_image.run()
         _stamp("embed_image")
+        img_ran = True     # scene segmentation reads this index -- cascade to M3
     else:
         log.info("[skip] visual index already built")
 
-    # 10. Evaluation (Fix #3)
+    # ---- Milestone 3: scenes, story, summary, event timeline ----
+    m3_ran = False
+
+    # 10. Scene segmentation  (offline; cuts on the CLIP index + title cards)
+    if ran or img_ran or _stale("scenes", [config.SCENES_JSON], args.force):
+        import scenes
+        scenes.run()
+        _stamp("scenes")
+        m3_ran = True
+    else:
+        log.info("[skip] scenes already segmented")
+
+    # 10.5 / 11. Narration. These are the only stages that need a network LLM, so
+    #     a missing OPENROUTER_API_KEY must WARN AND SKIP, never abort: Milestone
+    #     1 and 2 users have no key and their pipeline must still run to the end.
+    #     A populated data/llm_cache/ replays offline, so a fresh clone with the
+    #     committed cache reproduces both stages with no credential at all.
+    import llm
+    if not (llm.have_key() or any(config.LLM_CACHE_DIR.glob("*.json"))):
+        log.warning("[skip] Milestone 3 narration: OPENROUTER_API_KEY is unset "
+                    "and the response cache is empty. Scene segmentation and "
+                    "scene_index/story_segment metadata are unaffected.")
+    else:
+        # 10.5 VLM keyframe descriptions (eval reference + ablation input)
+        if config.NARRATE_VLM_ENABLE:
+            if m3_ran or _stale("describe", [config.SCENE_DESC_JSON], args.force):
+                import describe_scenes
+                try:
+                    describe_scenes.run()
+                    _stamp("describe")
+                except RuntimeError as e:
+                    log.warning("[skip] scene descriptions: %s", e)
+            else:
+                log.info("[skip] scene keyframes already described")
+
+        # 11. Story, summary, event timeline (all four prompt strategies)
+        if m3_ran or _stale("narrate", [config.STORY_JSON, config.TIMELINE_JSON],
+                            args.force):
+            import narrate
+            try:
+                narrate.run(all_strategies=True)
+                _stamp("narrate")
+            except RuntimeError as e:
+                log.warning("[skip] narration: %s", e)
+        else:
+            log.info("[skip] story and timeline already generated")
+
+    # 12. Metadata refresh. build_metadata is a cheap join and is always rebuilt;
+    #     running it again here folds the Milestone 3 scene_index, story_segment
+    #     and event_description columns into the repository. (It ran at stage 8
+    #     too, because embed_text reads frame_metadata.csv and must not wait on
+    #     stages that depend on the CLIP index it precedes.)
+    build_metadata.run()
+    _stamp("metadata")
+
+    # 13. Evaluation (Fix #3)
     if not args.no_eval:
         import eval as evaluation
         evaluation.run()
