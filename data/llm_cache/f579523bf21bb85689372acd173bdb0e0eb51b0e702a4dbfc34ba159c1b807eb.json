@@ -1,0 +1,18 @@
+{
+  "model": "google/gemma-4-31b-it:free",
+  "prompt": "You are shown 6 frames from a London Underground tour video. They are in chronological order and correspond, in order, to these scenes:\n\n  image 1: scene_index 19, at 10:16 (Jubilee Line)\n  image 2: scene_index 21, at 12:26 (Metropolitan Line)\n  image 3: scene_index 22, at 12:30 (Metropolitan Line)\n  image 4: scene_index 24, at 15:00 (Northern Line)\n  image 5: scene_index 25, at 15:06 (Northern Line)\n  image 6: scene_index 26, at 17:01 (Northern Line)\n\nFor EACH image, describe what is actually visible in 2-3 sentences. Be concrete. State the setting (platform, tunnel, train interior, escalator, concourse), whether a train is present and whether its doors are open, how many people are visible and what they are doing, and any station name or signage you can read.\n\nDescribe only what you can see. If there is no train in a frame, say so explicitly. Do not speculate about what happens before or after.\n\nReturn ONLY a JSON array, no prose and no code fence. One object per image, in the same order, each with exactly two keys:\n  \"scene_index\"  - the integer scene number from the list above\n  \"description\"  - your 2-3 sentence description of that image",
+  "params": {
+    "max_tokens": 1800,
+    "temperature": 0.0,
+    "seed": 0
+  },
+  "images": [
+    "d3447ca3bc30be0e@896",
+    "4f22bbfd4408857e@896",
+    "eb1e00aa010fbbf6@896",
+    "a9d68569cbfaa986@896",
+    "e5c9d093c4792685@896",
+    "03e8f98a80f379da@896"
+  ],
+  "response": "[\n  {\n    \"scene_index\": 19,\n    \"description\": \"A train is present on a platform at Swiss Cottage station, appearing blurred as if in motion with doors closed. One person is visible standing far down the platform. A station sign reads 'SWISS COTTAGE' and another says 'WAY OUT'.\"\n  },\n  {\n    \"scene_index\": 21,\n    \"description\": \"A close-up shot of a station sign on a wall. The sign features the London Underground roundel with the text 'FINCHLEY ROAD' in white letters on a blue bar.\"\n  },\n  {\n    \"scene_index\": 22,\n    \"description\": \"A train is present at an outdoor platform with its doors open. About six people are visible, with some boarding the train and others walking on the platform. A sign reads 'Metropolitan line Northbound platform 1'.\"\n  },\n  {\n    \"scene_index\": 24,\n    \"description\": \"A train is present at the Belsize Park station platform with its doors closed. Two people are standing on the platform near the train. A sign reads 'BELSIZE PARK' and a digital display shows 'Charing Cross 3 mins'.\"\n  },\n  {\n    \"scene_index\": 25,\n    \"description\": \"A train is present at the Belsize Park station platform with its doors closed. Two people are visible on the platform, and a few passengers are seen through the train windows. A sign reads 'BELSIZE PARK' and a 'Way out' sign is visible.\"\n  },\n  {\n    \"scene_index\": 26,\n    \"description\": \"No train is present on the platform at Belsize Park station. Two people are walking along the platform. A station sign reads 'BELSIZE PARK' and a 'Way out' sign is visible.\"\n  }\n]"
+}

@@ -555,3 +555,324 @@ def test_visual_search_ranks_descending():
     scores = res["score"].tolist()
     assert scores == sorted(scores, reverse=True)
     assert (res["field"] == "visual").all()
+
+
+# ------------------------------------------------- M3: scene segmentation
+def test_is_title_card_accepts_the_line_cards():
+    from scenes import is_title_card
+    # OCR rule: a bare line name. This is the ONLY signal that catches Piccadilly,
+    # whose caption the M2 echo-fix rewrote.
+    assert is_title_card("Piccadilly Line", "picdily line - screenshote") is True
+    assert is_title_card("Jubilee Line", "") is True
+    # caption rule: BLIP calls every card a black screen. This is the only signal
+    # that catches the intro card, whose text does not end in "Line".
+    assert is_title_card(
+        "London Underground Extravaganza All Lines! Tuesday November",
+        "a black background with the words london extrana") is True
+    # ...and the echo-fix fallback wording
+    assert is_title_card("", "a title card that reads: Northern Line") is True
+
+
+def test_is_title_card_rejects_platform_signage():
+    from scenes import is_title_card
+    # The 18:25-19:40 Victoria-line platform signage must NOT read as a card, or
+    # a naive /\bline/ would shatter that chapter into 20 fake chapters.
+    assert is_title_card("Victoria line northbound platform Walthamstow",
+                         "a subway station with a train") is False
+    assert is_title_card("EMBANKMENT", "a sign that says embankment") is False
+    assert is_title_card("", "a train is pulling passengers") is False
+
+
+def test_chapter_label_survives_garbled_first_frame():
+    from scenes import chapter_label
+    # frame 0 of the Piccadilly card OCRs as junk; a later frame is clean.
+    assert chapter_label(["picdily line - screenshote", "Piccadilly Line"]) \
+        == "Piccadilly Line"
+    assert chapter_label(["nothing useful"]) == "Introduction"
+
+
+def test_is_signage_keeps_stations_and_drops_ads():
+    from scenes import is_signage
+    for keep in ("EMBANKMENT", "FINCHLEY ROAD", "CASTLE", "Charing Cross",
+                 "Metropolitan Southbound platform"):
+        assert is_signage(keep) is True, keep
+    # OCR shrapnel
+    for drop in ("Son", "ran", "iff", "ars", "BES", "ill ace", "Watt", "vate"):
+        assert is_signage(drop) is False, drop
+    # in-carriage advertising: rule (b) would admit these without the stopword veto
+    for drop in ("London Experian Credit", "Experian Score", "Ticket holders only",
+                 "Now FREE Find out yours:"):
+        assert is_signage(drop) is False, drop
+
+
+def test_cut_indices_cuts_on_cosine_and_both_card_edges():
+    import numpy as np
+    from scenes import cut_indices
+    # frames:      0     1     2(card) 3(card) 4     5
+    sim = np.array([0.99, 0.95, 0.99,   0.95,  0.99])
+    is_card = [False, False, True, True, False, False]
+    cuts = cut_indices(sim, is_card, thresh=0.70, force_cards=True)
+    # no cosine drop below 0.70, so only the card's two edges cut (plus frame 0)
+    assert cuts == [0, 2, 4]
+
+
+def test_cut_indices_cuts_on_low_cosine():
+    import numpy as np
+    from scenes import cut_indices
+    sim = np.array([0.99, 0.41, 0.99])
+    cuts = cut_indices(sim, [False] * 4, thresh=0.70, force_cards=True)
+    assert cuts == [0, 2]
+
+
+def test_merge_short_never_drops_a_protected_boundary():
+    from scenes import merge_short
+    ts = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
+    # The scene starting at frame 5 spans ts[7]-ts[5] = 2.0s, under the 3s floor.
+    assert merge_short([0, 5], ts, min_sec=3.0, protected=set()) == [0]
+    # ...but the same 2s beat survives when protected. Title cards run ~3 frames
+    # (2.0s by this span measure), so without protection every chapter marker --
+    # the very thing we force cuts for -- would be merged away.
+    assert merge_short([0, 5], ts, min_sec=3.0, protected={5}) == [0, 5]
+    # a boundary whose scene clears the floor survives regardless of protection
+    assert merge_short([0, 2, 4], ts, min_sec=3.0, protected=set()) == [0, 4]
+
+
+def test_medoid_index_picks_the_central_frame():
+    import numpy as np
+    from scenes import medoid_index
+    block = np.array([[1.0, 0.0], [0.98, 0.2], [0.0, 1.0]], dtype=np.float32)
+    block /= np.linalg.norm(block, axis=1, keepdims=True)
+    # rows 0 and 1 are near-identical; the centroid sits between them, so the
+    # medoid must be one of them, never the orthogonal outlier.
+    assert medoid_index(block) in (0, 1)
+
+
+# ------------------------------------------------- M3: llm cache seam
+def test_cache_key_is_order_stable_and_content_sensitive():
+    from llm import cache_key
+    p = {"temperature": 0.0, "max_tokens": 10}
+    assert cache_key("m", "p", ["d"], p) == cache_key("m", "p", ["d"],
+                                                      {"max_tokens": 10,
+                                                       "temperature": 0.0})
+    assert cache_key("m", "p", ["d"], p) != cache_key("m", "p2", ["d"], p)
+    assert cache_key("m", "p", ["d"], p) != cache_key("m", "p", ["d2"], p)
+    assert cache_key("m", "p", ["d"], p) != cache_key("m2", "p", ["d"], p)
+
+
+def test_generate_without_key_raises_runtimeerror_not_keyerror(monkeypatch):
+    import llm
+    # Force the no-key path deterministically, independent of ambient env/.env, so
+    # the test never reaches the network and can never pollute the committed cache
+    # (an earlier version of this test did exactly that). A cache miss with no key
+    # must raise RuntimeError -- never a bare KeyError on os.environ.
+    monkeypatch.setattr(llm, "api_key", lambda: None)
+    with pytest.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+        llm.generate(f"uncacheable probe {id(object())}", use_cache=False)
+
+
+# ------------------------------------------------- M3: narration helpers
+def test_parse_mmss():
+    from narrate import parse_mmss
+    assert parse_mmss("12:23") == 743
+    assert parse_mmss("0:06") == 6
+    assert parse_mmss("1:75") is None      # 75 seconds is not a timestamp
+    assert parse_mmss("garbage") is None
+
+
+def test_extract_json_array_tolerates_fences_and_preamble():
+    from narrate import extract_json_array
+    assert extract_json_array('Sure!\n```json\n[{"a": 1}]\n```') == [{"a": 1}]
+    assert extract_json_array('[{"a": 1}]') == [{"a": 1}]
+    assert extract_json_array("[[1, 2], [3]]") == [[1, 2], [3]]
+    assert extract_json_array("no array at all") is None
+    assert extract_json_array("[broken") is None
+
+
+def test_validate_timeline_repairs_rather_than_trusts():
+    from narrate import validate_timeline
+    events, problems = validate_timeline([
+        {"timestamp": "5:00", "description": "later"},
+        {"timestamp": "1:00", "description": "earlier"},
+        {"timestamp": "99:00", "description": "past the end of the video"},
+        {"timestamp": "nonsense", "description": "unparseable"},
+        {"timestamp": "2:00", "description": ""},
+    ], max_sec=1415.5)
+    assert [e["timestamp"] for e in events] == ["1:00", "5:00"]   # sorted
+    assert any("out of range" in p for p in problems)
+    assert any("unparseable" in p for p in problems)
+    assert any("chronological order" in p for p in problems)
+
+
+def test_strip_reasoning_removes_thinking_block():
+    from narrate import strip_reasoning
+    assert strip_reasoning("<thinking>plan</thinking>\n\n## Story\ntext") \
+        == "## Story\ntext"
+    assert strip_reasoning("## Story\ntext") == "## Story\ntext"
+
+
+def test_split_segments_maps_headings_to_chapters():
+    from narrate import split_segments
+    story = "## Bakerloo Line\nOpens at 0:06.\n\n## Central Line\nThen onward."
+    assert split_segments(story, {"Bakerloo Line", "Central Line"}) == {
+        "Bakerloo Line": "Opens at 0:06.", "Central Line": "Then onward."}
+    assert split_segments("no headings here", {"Bakerloo Line"}) == {}
+
+
+def test_scene_digest_marks_title_cards_and_swaps_in_vlm_text():
+    from narrate import scene_digest
+    scenes = [
+        {"is_title_card": True, "start_mmss": "0:06", "end_mmss": "0:08",
+         "chapter_label": "Bakerloo Line"},
+        {"is_title_card": False, "start_mmss": "0:09", "end_mmss": "0:11",
+         "chapter_label": "Bakerloo Line", "scene_index": 1, "n_frames": 3,
+         "representative_caption": "a sign", "ocr_texts": ["EMBANKMENT"],
+         "face_ids": []},
+    ]
+    plain = scene_digest(scenes)
+    assert 'TITLE CARD: "Bakerloo Line"' in plain
+    assert "visual: a sign" in plain and "EMBANKMENT" in plain
+    assert "recurring faces present: none" in plain
+    # the ablation swaps the caption for the vision model's description
+    vlm = scene_digest(scenes, {1: "An empty platform, no train present."})
+    assert "visual: An empty platform, no train present." in vlm
+    assert "a sign" not in vlm
+
+
+# ------------------------------------------------- M3: story evaluation
+def test_chronology_score_detects_time_travel():
+    from eval_story import chronology_score, cited_timestamps
+    assert chronology_score(cited_timestamps("at 0:06 then 2:18 then 12:23")) == 1.0
+    # one backward step out of two adjacent pairs
+    assert chronology_score([743, 6, 138]) == pytest.approx(0.5)
+    assert chronology_score([5]) == 1.0     # vacuous, reported with the count
+
+
+def test_grounding_catches_invented_content():
+    from eval_story import grounding
+    # "escalator" appears in no caption -> ungrounded
+    assert grounding("A crowded escalator", "a train at a subway platform") == 0.0
+    assert grounding("a train platform", "a train is at the platform") == 1.0
+
+
+def test_distinct_ngram_ratio_penalises_repetition():
+    from eval_story import distinct_ngram_ratio
+    repetitive = distinct_ngram_ratio("a train a train a train a train", 3)
+    varied = distinct_ngram_ratio("the quick brown fox jumps over lazy dogs", 3)
+    assert repetitive < varied
+    assert varied == 1.0
+
+
+def test_caption_adequacy_measures_what_blip_missed():
+    from eval_story import caption_adequacy
+    # BLIP hallucinates a train; the VLM sees an empty platform with an escalator
+    low = caption_adequacy("a train is pulling passengers",
+                           "An empty platform with an escalator and no train")
+    high = caption_adequacy("an empty platform with an escalator and no train",
+                            "An empty platform with an escalator and no train")
+    assert low < 0.5 < high
+
+
+def test_scene_coverage_counts_mentioned_chapters():
+    from eval_story import scene_coverage
+    assert scene_coverage("We ride the Jubilee Line.",
+                          ["Jubilee Line", "Victoria Line"]) == 0.5
+
+
+def test_timeline_in_scene_bounds():
+    from eval_story import timeline_in_scene_bounds
+    scenes = [{"start_sec": 0.0, "end_sec": 5.0}, {"start_sec": 20.0, "end_sec": 25.0}]
+    # 3.0 inside scene 0; 12.0 is in neither span and beyond tolerance
+    assert timeline_in_scene_bounds([{"timestamp_sec": 3.0},
+                                     {"timestamp_sec": 12.0}], scenes) == pytest.approx(0.5)
+    # a whole-second m:ss event just before a sub-second scene start still matches
+    # (2:18 = 138.0s vs a scene starting at 138.138s must not read as out of bounds)
+    assert timeline_in_scene_bounds([{"timestamp_sec": 138.0}],
+                                    [{"start_sec": 138.138, "end_sec": 140.140}]) == 1.0
+
+
+# ------------------------------------------------- M3: artifact schemas
+def test_scenes_json_schema():
+    import config
+    if not config.SCENES_JSON.exists():
+        pytest.skip("scenes.json not generated yet")
+    with open(config.SCENES_JSON) as f:
+        scenes = json.load(f)
+    assert scenes, "no scenes"
+    required = {"scene_index", "chapter_index", "chapter_label", "is_title_card",
+                "start_sec", "end_sec", "start_mmss", "end_mmss", "n_frames",
+                "start_frame_id", "end_frame_id", "keyframe_frame_id",
+                "keyframe_file", "face_ids", "ocr_texts",
+                "representative_caption", "captions"}
+    assert required.issubset(scenes[0].keys())
+    # scenes tile the video: contiguous, ordered, every frame in exactly one
+    assert [s["scene_index"] for s in scenes] == list(range(len(scenes)))
+    for a, b in zip(scenes, scenes[1:]):
+        assert a["end_frame_id"] + 1 == b["start_frame_id"]
+        assert a["start_sec"] <= b["start_sec"]
+    # the video is a 12-chapter tour: an intro card plus 11 Underground lines
+    cards = [s for s in scenes if s["is_title_card"]]
+    assert len(cards) == 12
+    assert len({c["chapter_label"] for c in cards}) == 12
+    assert sum(c["chapter_label"] == "Introduction" for c in cards) == 1
+
+
+def test_metadata_has_milestone3_fields():
+    import config
+    if not config.METADATA_JSON.exists():
+        pytest.skip("frame_metadata.json not generated yet")
+    with open(config.METADATA_JSON) as f:
+        meta = json.load(f)
+    # Task 4: metadata enhancement -- story segment, event description, scene index
+    for key in ("scene_index", "story_segment", "event_description"):
+        assert key in meta[0], key
+    if not config.SCENES_JSON.exists():
+        pytest.skip("scenes.json absent: M3 columns are legitimately empty")
+    assert all(r["scene_index"] is not None for r in meta)
+    assert all(r["story_segment"] for r in meta)
+
+
+def test_timeline_json_is_chronological_and_in_range():
+    import config
+    if not config.TIMELINE_JSON.exists():
+        pytest.skip("timeline.json not generated yet")
+    with open(config.TIMELINE_JSON) as f:
+        events = json.load(f)["events"]
+    secs = [e["timestamp_sec"] for e in events]
+    assert secs == sorted(secs), "timeline must run forwards"
+    assert all(0 <= s <= config.VIDEO_DURATION_SEC for s in secs)
+    assert all(e["description"].strip() for e in events)
+
+
+def test_story_json_schema():
+    import config
+    if not config.STORY_JSON.exists():
+        pytest.skip("story.json not generated yet")
+    with open(config.STORY_JSON) as f:
+        story = json.load(f)
+    assert {"model", "strategy", "source", "summary", "story", "segments"} \
+        .issubset(story.keys())
+    assert story["story"].strip() and story["summary"].strip()
+
+
+# ------------------------------------------------- M3: batched VLM descriptions
+def test_parse_batch_enforces_the_scene_index_contract():
+    from describe_scenes import parse_batch
+    reply = ('[{"scene_index": 2, "description": "An empty platform."},'
+             ' {"scene_index": 3, "description": "A train with doors open."}]')
+    assert parse_batch(reply, {2, 3}) == {
+        2: "An empty platform.", 3: "A train with doors open."}
+    # a scene we did not ask about is discarded rather than trusted -- this is what
+    # stops a mis-aligned batch reply from silently mislabelling 24 keyframes
+    assert parse_batch(reply, {2}) == {2: "An empty platform."}
+    # empty descriptions and non-objects are dropped
+    assert parse_batch('[{"scene_index": 2, "description": ""}, 7]', {2}) == {}
+    # the caller sees the omission and can retry that scene on its own
+    assert set(parse_batch(reply, {2, 3, 4})) == {2, 3}
+
+
+def test_parse_batch_survives_fences_and_junk():
+    from describe_scenes import parse_batch
+    fenced = '```json\n[{"scene_index": 5, "description": "A tunnel."}]\n```'
+    assert parse_batch(fenced, {5}) == {5: "A tunnel."}
+    assert parse_batch("the model refused to emit json", {5}) == {}
+    assert parse_batch('[{"scene_index": "not an int", "description": "x"}]', {5}) == {}
