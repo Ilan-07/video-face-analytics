@@ -319,6 +319,29 @@ Task 3 requirement over the artifacts the pipeline already produces. Each tab
 degrades to an instruction rather than an exception when its stage has not run, so
 a Milestone 1 user with no captions and no API key still gets a working app.
 
+*Dashboard* — headline counts and per-identity screen time, straight from the pipeline:
+
+![Dashboard tab](screenshots/10_dashboard.png)
+
+*Search* — lexical, semantic, visual, and **fused** (reciprocal-rank fusion of the
+semantic and visual indexes); either index can surface a frame the other misses:
+
+![Fused search for "underground train"](screenshots/11_search_fused.png)
+
+*Faces* — per-identity occurrence statistics and montages, with the demographic
+estimates flagged as unvalidated:
+
+![Faces tab](screenshots/12_faces.png)
+
+*Captions & OCR* — the joined frame-metadata repository that powers search, with a
+frame viewer:
+
+![Captions & OCR tab](screenshots/13_captions_ocr.png)
+
+*Story & Timeline* — the generated summary and the per-line narrated story:
+
+![Story and summary](screenshots/14_story_summary.png)
+
 **One evaluation.** `eval_system.py` is a reducer, not a new measurement: it reads
 the stage timings and the JSON already emitted by every milestone's harness and
 reports processing time, output quality, and limitations. Its one design
