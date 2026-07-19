@@ -1244,6 +1244,18 @@ def test_verify_grounding_drops_unsupported_keeps_grounded_and_headings():
     assert "dragon" not in out                # hallucinated sentence removed
 
 
+def test_collapse_repetition_trims_a_degeneration_loop():
+    """The free-tier model loops 'the same same same ...' under greedy decoding;
+    the guard must cut the loop and keep the coherent prefix, ending on a sentence."""
+    import narrate
+    bad = ("This video records the Underground. It shows trains. "
+           "same same same same same same own own own own own own")
+    out = narrate.collapse_repetition(bad)
+    assert out == "This video records the Underground. It shows trains."
+    clean = "A tidy summary. No loops here at all."
+    assert narrate.collapse_repetition(clean) == clean   # unchanged
+
+
 def test_verify_grounding_keeps_short_asides_it_cannot_judge():
     """A sentence with too few content words is noise to the metric, so it is
     kept rather than condemned on a coin-flip."""

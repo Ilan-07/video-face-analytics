@@ -259,7 +259,8 @@ def _post(model: str, prompt: str, images: list, params: dict) -> str:
 
 def generate(prompt: str, images=None, model: str | None = None,
              max_tokens: int | None = None, temperature: float | None = None,
-             use_cache: bool | None = None) -> str:
+             use_cache: bool | None = None, frequency_penalty: float | None = None
+             ) -> str:
     """Return the model's completion for `prompt` (+ optional image paths).
 
     Consults data/llm_cache first; only a miss touches the network, and only a
@@ -274,6 +275,9 @@ def generate(prompt: str, images=None, model: str | None = None,
                         if temperature is None else temperature),
         "seed": config.NARRATE_SEED,
     }
+    # Only add when set, so existing cache keys (which omit it) stay valid.
+    if frequency_penalty:
+        params["frequency_penalty"] = frequency_penalty
 
     digests = [_image_digest(p) for p in images]
     key = cache_key(model, prompt, digests, params)

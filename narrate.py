@@ -340,10 +340,29 @@ def generate_story(scenes, strategy: str, source: str = "captions") -> str:
     return story
 
 
+def collapse_repetition(text: str) -> str:
+    """Truncate a degenerate repetition loop, keeping the coherent prefix.
+
+    The free-tier model sometimes falls into a loop -- 'the same same same ...'
+    for hundreds of tokens -- under greedy decoding. When a word repeats more than
+    NARRATE_MAX_WORD_RUN times in a row, everything from the start of that run is
+    discarded and the text is cut back to its last complete sentence. Pure and
+    unit-tested; clean text passes through unchanged."""
+    words = text.split()
+    run = max(1, config.NARRATE_MAX_WORD_RUN)
+    for i in range(run, len(words)):
+        if len(set(w.lower().strip(".,!?") for w in words[i - run:i + 1])) == 1:
+            head = " ".join(words[:i - run]).rstrip()
+            m = re.search(r"^(.*[.!?])", head, re.S)   # end on a full sentence
+            return (m.group(1) if m else head).strip()
+    return text
+
+
 def generate_summary(scenes, source: str = "captions") -> str:
     digest = _digest_for(scenes, source)
-    summary = llm.generate(_SUMMARY_PROMPT.format(digest=digest),
-                           max_tokens=600).strip()
+    summary = collapse_repetition(llm.generate(
+        _SUMMARY_PROMPT.format(digest=digest), max_tokens=600,
+        frequency_penalty=config.NARRATE_SUMMARY_FREQ_PENALTY).strip())
     # NOT summary.md: analytics.py owns that (the Milestone 1 face-analytics
     # summary). This is the video-content summary, a different artifact.
     path = config.REPORT_DIR / "video_summary.md"

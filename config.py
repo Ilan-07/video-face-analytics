@@ -429,6 +429,12 @@ NARRATE_CACHE = True        # replay data/llm_cache/*.json instead of re-calling
 NARRATE_VERIFY = False
 NARRATE_VERIFY_MIN = 0.20      # drop a sentence grounding below this fraction
 NARRATE_VERIFY_MIN_WORDS = 4   # ...but only if it has >= this many content words
+
+# The free-tier model degenerates into repetition loops ("the same same same...")
+# under greedy decoding (temperature 0). A frequency penalty on the summary breaks
+# the loop at the source; _collapse_repetition trims any that slips through.
+NARRATE_SUMMARY_FREQ_PENALTY = 0.6   # >0 penalises repeated tokens (summary only)
+NARRATE_MAX_WORD_RUN = 4             # trim once a word repeats this many times
 NARRATE_VLM_ENABLE = True   # keyframe re-captioning (ablation + eval reference)
 NARRATE_VLM_BATCH = 6       # keyframes per vision request. Gemma 4 accepts many
                             # images per message, and the ":free" tier allows only
