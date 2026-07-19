@@ -102,6 +102,35 @@ def _ocr_frame(bgr) -> tuple[str, int, float]:
     return text, len(tokens), mean_conf
 
 
+def _likely_has_text(bgr) -> bool:
+    """Cheap gate for OCR_SKIP_LOW_TEXT: text produces dense edges, so a frame
+    whose Canny-edge fraction is tiny almost never holds signage. Deliberately
+    lenient (skips only near-blank frames) since a false skip costs recall."""
+    edges = cv2.Canny(cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY), 80, 160)
+    return bool((edges > 0).mean() >= config.OCR_TEXT_EDGE_MIN)
+
+
+def _ocr_task(task) -> list:
+    """Worker: OCR one frame, returning its ocr.csv row. Top-level and pure of
+    shared state so it survives multiprocessing 'spawn' on macOS."""
+    frame_id, ts, filename, faces = task
+    ts_str = f"{ts:.3f}"
+    img = cv2.imread(str(config.FRAME_DIR / filename))
+    if img is None:
+        return [frame_id, ts_str, faces, "", 0, 0.0]
+    if config.OCR_SKIP_LOW_TEXT and not _likely_has_text(img):
+        return [frame_id, ts_str, faces, "", 0, 0.0]
+    text, n_tok, conf = _ocr_frame(img)
+    return [frame_id, ts_str, faces, text, n_tok, conf]
+
+
+def _pool_init() -> None:
+    """Pin each worker's Tesseract to a single thread: N processes each grabbing
+    every core would oversubscribe and run slower than the serial path."""
+    import os
+    os.environ.setdefault("OMP_THREAD_LIMIT", "1")
+
+
 def _check_tesseract() -> None:
     """Fail early with a friendly message if the Tesseract binary is missing."""
     if shutil.which("tesseract"):
@@ -124,25 +153,30 @@ def run() -> int:
              len(frames), config.OCR_LANG, config.OCR_PSM,
              config.OCR_MIN_CONF, config.OCR_MIN_TOKEN_LEN)
 
-    n_text = 0
+    tasks = [(int(r.frame_id), float(r.timestamp_sec), r.filename,
+              "|".join(face_map.get(int(r.frame_id), [])))
+             for r in frames.itertuples(index=False)]
+
+    workers = max(1, min(config.OCR_WORKERS, len(tasks)))
+    log.info("OCR workers=%d, skip_low_text=%s", workers, config.OCR_SKIP_LOW_TEXT)
+
+    # imap keeps frame order (ocr.csv must stay aligned with frames.csv); a serial
+    # path is kept for workers=1 so tests and tiny runs avoid spawn overhead.
+    if workers == 1:
+        results = (_ocr_task(t) for t in tasks)
+        rows = list(tqdm(results, total=len(tasks), desc="ocr"))
+    else:
+        import multiprocessing as mp
+        with mp.Pool(workers, initializer=_pool_init) as pool:
+            rows = list(tqdm(pool.imap(_ocr_task, tasks, chunksize=8),
+                             total=len(tasks), desc="ocr"))
+
+    n_text = sum(1 for r in rows if r[3])
     with open(config.OCR_CSV, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["frame_id", "timestamp_sec", "face_ids",
                     "text", "n_tokens", "mean_conf"])
-        for row in tqdm(frames.itertuples(index=False), total=len(frames),
-                        desc="ocr"):
-            faces = "|".join(face_map.get(int(row.frame_id), []))
-            img = cv2.imread(str(config.FRAME_DIR / row.filename))
-            if img is None:
-                log.warning("could not read frame %s", row.filename)
-                w.writerow([row.frame_id, f"{row.timestamp_sec:.3f}",
-                            faces, "", 0, 0.0])
-                continue
-            text, n_tok, conf = _ocr_frame(img)
-            if text:
-                n_text += 1
-            w.writerow([row.frame_id, f"{row.timestamp_sec:.3f}",
-                        faces, text, n_tok, conf])
+        w.writerows(rows)
 
     log.info("OCR done: %d/%d frames had text -> %s",
              n_text, len(frames), config.OCR_CSV.name)

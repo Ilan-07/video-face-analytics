@@ -366,10 +366,13 @@ After a run, results land in `reports/` and `data/`:
 
 ## Setup
 ```bash
+make bootstrap          # venv + pinned deps + binary checks + model prefetch
+# ...or manually:
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
-Requires `ffmpeg` on PATH. Face inference is CPU-only by default
+`make help` lists the common workflows (`pipeline`, `app`, `test`, `smoke`,
+`transcribe`). Requires `ffmpeg` on PATH. Face inference is CPU-only by default
 (`CPUExecutionProvider`); a GPU `onnxruntime` provider is optional. The Milestone 2
 OCR stage needs the **Tesseract** binary (`brew install tesseract` on macOS); the
 captioning stage uses Apple **MPS** automatically when available, else CPU.
@@ -396,6 +399,28 @@ dependencies and is recommended only with the human review step:
 .venv/bin/python -m pip install -r requirements-appearance.txt
 # set config.APPEARANCE_ENABLE = True, then re-run the pipeline
 ```
+
+### Optional: speech transcription (audio channel)
+Adds a `speech` column to the frame metadata and folds transcribed dialogue into
+the search index and narration digest, lifting the vision-only ceiling. Needs
+`ffmpeg` plus `faster-whisper`; absent either, the stage skips and the pipeline is
+unchanged.
+```bash
+.venv/bin/python -m pip install faster-whisper   # WHISPER_ENABLE is on by default
+```
+
+### Optional: face super-resolution
+Super-resolves sub-`SR_MIN_PX` faces before the ArcFace embedding, targeting the
+identity fragmentation that small faces cause. Off by default (`config.SR_ENABLE`);
+it changes every grouping number, so enabling it reruns detection and you should
+re-run the eval harnesses. Needs `opencv-contrib-python` and a `dnn_superres` model
+file at `config.SR_MODEL_PATH`.
+
+### Resilience
+The narration stage falls back to a local OpenAI-compatible endpoint
+(`config.NARRATE_FALLBACK_BASE_URL`, e.g. Ollama) when OpenRouter has no key or is
+rate-limited. `config.NARRATE_VERIFY` drops story sentences the scene digest does
+not attest, turning the grounding metric into an enforced floor.
 
 ## Run
 ```bash

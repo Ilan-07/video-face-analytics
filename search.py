@@ -31,9 +31,16 @@ import config
 
 def load_metadata() -> pd.DataFrame:
     """Load frame_metadata.json into a DataFrame (face_ids kept as lists)."""
+    import util
     with open(config.METADATA_JSON) as f:
         records = json.load(f)
-    return pd.DataFrame.from_records(records)
+    df = pd.DataFrame.from_records(records)
+    # Fail loudly at the seam if the repository lost a column search depends on,
+    # instead of raising a cryptic KeyError deep in a ranking call later.
+    util.require_columns(df, ["frame_id", "timestamp_sec", "filename",
+                              "face_ids", "ocr_text", "caption"],
+                         "frame_metadata.json")
+    return df
 
 
 def fmt_ts(sec: float) -> str:

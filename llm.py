@@ -174,28 +174,40 @@ def _content(prompt: str, images: list) -> list:
     return parts
 
 
-def _post(model: str, prompt: str, images: list, params: dict) -> str:
-    import requests   # deferred: cache replays must not need the dependency
+def _providers(model: str) -> list:
+    """Ordered (name, base_url, headers, model) endpoints to try.
 
+    OpenRouter first whenever a key is present; a local OpenAI-compatible endpoint
+    (Ollama, `NARRATE_FALLBACK_BASE_URL`) as a fallback when one is configured. The
+    point is resilience: a missing key or a free tier exhausted by 429s degrades to
+    local generation instead of failing the narration stage outright."""
+    out = []
     key = api_key()
-    if not key:
-        raise RuntimeError(_NO_KEY_MSG.format(cache=config.LLM_CACHE_DIR))
+    if key:
+        out.append(("openrouter", config.NARRATE_BASE_URL,
+                    {"Authorization": f"Bearer {key}",
+                     "Content-Type": "application/json"}, model))
+    if config.NARRATE_FALLBACK_BASE_URL:
+        out.append(("local", config.NARRATE_FALLBACK_BASE_URL.rstrip("/"),
+                    {"Content-Type": "application/json"},
+                    config.NARRATE_FALLBACK_MODEL or model))
+    return out
 
-    body = {"model": model,
-            "messages": [{"role": "user", "content": _content(prompt, images)}],
-            **params}
+
+def _post_one(requests, name: str, base_url: str, headers: dict,
+              body: dict) -> str:
+    """One provider's request, with retry/backoff on 429 + 5xx. Raises RuntimeError
+    on definitive failure so _post can move to the next provider."""
+    model = body["model"]
     delay = 2.0
     for attempt in range(1, config.NARRATE_MAX_RETRIES + 1):
-        r = requests.post(
-            config.NARRATE_BASE_URL + _ENDPOINT,
-            headers={"Authorization": f"Bearer {key}",
-                     "Content-Type": "application/json"},
-            json=body, timeout=config.NARRATE_TIMEOUT)
+        r = requests.post(base_url + _ENDPOINT, headers=headers, json=body,
+                          timeout=config.NARRATE_TIMEOUT)
         # ":free" models 404 with "No endpoints found" until the account opts in
         # to prompt publication -- a confusing error worth translating.
         if r.status_code == 404 and ":free" in model:
             raise RuntimeError(
-                f"OpenRouter has no endpoint for '{model}'. Free models require "
+                f"{name} has no endpoint for '{model}'. Free models require "
                 "opting in at https://openrouter.ai/settings/privacy "
                 "(enable free endpoints that may publish prompts).")
         # 429 = rate limit (the free vision endpoints are congested upstream, and
@@ -203,25 +215,46 @@ def _post(model: str, prompt: str, images: list, params: dict) -> str:
         if r.status_code == 429 or r.status_code >= 500:
             if attempt == config.NARRATE_MAX_RETRIES:
                 raise RuntimeError(
-                    f"OpenRouter returned {r.status_code} after "
+                    f"{name} returned {r.status_code} after "
                     f"{attempt} attempts: {r.text[:200]}")
             wait = delay + random.uniform(0, 1.5)   # jitter: avoid lockstep retries
             retry_after = r.headers.get("Retry-After")
             if retry_after and retry_after.isdigit():
                 wait = min(int(retry_after), config.NARRATE_RETRY_MAX_DELAY)
-            log.warning("HTTP %d from OpenRouter -- retry %d/%d in %.0fs",
-                        r.status_code, attempt, config.NARRATE_MAX_RETRIES, wait)
+            log.warning("HTTP %d from %s -- retry %d/%d in %.0fs",
+                        r.status_code, name, attempt,
+                        config.NARRATE_MAX_RETRIES, wait)
             time.sleep(wait)
             delay = min(delay * 2, config.NARRATE_RETRY_MAX_DELAY)
             continue
         if r.status_code != 200:
-            raise RuntimeError(f"OpenRouter {r.status_code}: {r.text[:300]}")
+            raise RuntimeError(f"{name} {r.status_code}: {r.text[:300]}")
 
         data = r.json()
-        if "choices" not in data:      # OpenRouter reports some errors in a 200
-            raise RuntimeError(f"unexpected OpenRouter response: {str(data)[:300]}")
+        if "choices" not in data:      # some errors are reported inside a 200
+            raise RuntimeError(f"unexpected {name} response: {str(data)[:300]}")
         return data["choices"][0]["message"]["content"]
     raise RuntimeError("unreachable")
+
+
+def _post(model: str, prompt: str, images: list, params: dict) -> str:
+    import requests   # deferred: cache replays must not need the dependency
+
+    providers = _providers(model)
+    if not providers:
+        raise RuntimeError(_NO_KEY_MSG.format(cache=config.LLM_CACHE_DIR))
+
+    content = _content(prompt, images)
+    errors = []
+    for name, base_url, headers, pmodel in providers:
+        body = {"model": pmodel,
+                "messages": [{"role": "user", "content": content}], **params}
+        try:
+            return _post_one(requests, name, base_url, headers, body)
+        except (RuntimeError, requests.RequestException) as e:
+            log.warning("provider %s unavailable, trying next: %s", name, e)
+            errors.append(f"{name}: {e}")
+    raise RuntimeError("all narration providers failed -- " + " | ".join(errors))
 
 
 def generate(prompt: str, images=None, model: str | None = None,

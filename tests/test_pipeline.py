@@ -1174,3 +1174,170 @@ def test_run_guarded_swallows_a_missing_input(monkeypatch):
     monkeypatch.setattr(evalmod, "__import__", lambda name: _Boom, raising=False)
     # Should not raise despite the harness raising FileNotFoundError.
     evalmod._run_guarded("eval_labeled")
+
+
+# ------------------------------------------------- M4b: atomic writes
+def test_write_json_atomic_roundtrips_and_leaves_no_temp(tmp_path):
+    import util
+    p = tmp_path / "sub" / "a.json"
+    util.write_json_atomic(p, {"x": 1}, indent=2)
+    assert json.loads(p.read_text()) == {"x": 1}
+    assert list(tmp_path.rglob("*.tmp")) == []      # temp cleaned up
+
+
+def test_atomic_write_failure_preserves_the_old_file(tmp_path):
+    """A crash mid-write must leave the previous complete file intact, never a
+    half-written one -- the whole reason for the temp+replace dance."""
+    import util
+    p = tmp_path / "a.txt"
+    util.write_text_atomic(p, "good")
+
+    with pytest.raises(TypeError):
+        # json.dumps of an unserializable object raises before any replace.
+        util.write_json_atomic(p, {1, 2, 3})        # set is not JSON-serializable
+    assert p.read_text() == "good"                  # old content survived
+    assert list(tmp_path.rglob("*.tmp")) == []      # no orphan temp left
+
+
+def test_require_columns_names_the_missing_one():
+    import util
+    df = pd.DataFrame({"frame_id": [1], "caption": ["x"]})
+    util.require_columns(df, ["frame_id"], "meta")   # present: no raise
+    with pytest.raises(ValueError, match="ocr_text"):
+        util.require_columns(df, ["frame_id", "ocr_text"], "meta")
+
+
+# ------------------------------------------------- M4b: parallel OCR helpers
+def test_ocr_task_returns_blank_row_for_a_missing_frame(monkeypatch, tmp_path):
+    """A worker must never crash the pool on an unreadable frame; it emits an
+    empty row so ocr.csv stays aligned with frames.csv."""
+    import config
+    import ocr
+    monkeypatch.setattr(config, "FRAME_DIR", tmp_path)
+    row = ocr._ocr_task((7, 7.0, "does_not_exist.jpg", "Face_01"))
+    assert row == [7, "7.000", "Face_01", "", 0, 0.0]
+
+
+def test_likely_has_text_gates_blank_vs_edgy(monkeypatch):
+    import numpy as np
+    import config
+    import ocr
+    monkeypatch.setattr(config, "OCR_TEXT_EDGE_MIN", 0.01)
+    blank = np.zeros((64, 64, 3), dtype=np.uint8)
+    assert ocr._likely_has_text(blank) is False
+    edgy = np.zeros((64, 64, 3), dtype=np.uint8)
+    edgy[::2, :, :] = 255                      # dense horizontal edges
+    assert ocr._likely_has_text(edgy) is True
+
+
+# ------------------------------------------ M3: narration grounding verification
+def test_verify_grounding_drops_unsupported_keeps_grounded_and_headings():
+    import narrate
+    digest = "train platform victoria station passengers underground escalator"
+    story = ("## Victoria Line\n\n"
+             "The train arrived at the crowded platform.\n"
+             "A dragon breathed fire across the ancient castle battlements.")
+    out, dropped = narrate.verify_grounding(story, digest)
+    assert dropped == 1
+    assert "## Victoria Line" in out          # heading untouched
+    assert "train arrived" in out             # grounded sentence kept
+    assert "dragon" not in out                # hallucinated sentence removed
+
+
+def test_verify_grounding_keeps_short_asides_it_cannot_judge():
+    """A sentence with too few content words is noise to the metric, so it is
+    kept rather than condemned on a coin-flip."""
+    import narrate
+    out, dropped = narrate.verify_grounding("It moved.", "train platform")
+    assert dropped == 0 and "It moved." in out
+
+
+# ------------------------------------------------- M3b: LLM provider fallback
+def test_providers_order_key_then_local(monkeypatch):
+    import config
+    import llm
+    monkeypatch.setattr(llm, "api_key", lambda: "sk-x")
+    monkeypatch.setattr(config, "NARRATE_FALLBACK_BASE_URL", "http://local:11434/v1")
+    monkeypatch.setattr(config, "NARRATE_FALLBACK_MODEL", "llava")
+    names = [p[0] for p in llm._providers("gemma")]
+    assert names == ["openrouter", "local"]
+
+    monkeypatch.setattr(llm, "api_key", lambda: None)   # no key -> local only
+    assert [p[0] for p in llm._providers("gemma")] == ["local"]
+
+    monkeypatch.setattr(config, "NARRATE_FALLBACK_BASE_URL", "")
+    assert llm._providers("gemma") == []                # nothing to try
+
+
+def test_post_falls_back_to_local_when_openrouter_is_exhausted(monkeypatch):
+    import sys
+    import config
+    import llm
+
+    class _Resp:
+        def __init__(self, status, payload=None, text=""):
+            self.status_code, self._p, self.text = status, payload or {}, text
+            self.headers = {}
+        def json(self):
+            return self._p
+
+    class _FakeRequests:
+        RequestException = Exception
+        def post(self, url, **kw):
+            if "openrouter" in url:
+                return _Resp(429, text="rate limited")          # always throttled
+            return _Resp(200, {"choices": [{"message":
+                        {"content": "local story"}}]})
+
+    monkeypatch.setitem(sys.modules, "requests", _FakeRequests())
+    monkeypatch.setattr(llm, "api_key", lambda: "sk-x")
+    monkeypatch.setattr(config, "NARRATE_BASE_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(config, "NARRATE_FALLBACK_BASE_URL", "http://local:11434/v1")
+    monkeypatch.setattr(config, "NARRATE_FALLBACK_MODEL", "llava")
+    monkeypatch.setattr(config, "NARRATE_MAX_RETRIES", 1)   # 429 fails fast, no sleep
+
+    assert llm._post("gemma", "hi", [], {}) == "local story"
+
+
+# ------------------------------------------------- M4a: speech transcription
+def test_segments_by_frame_interval_join():
+    import transcribe
+    segs = [{"start": 0.0, "end": 2.0, "text": "mind the gap"},
+            {"start": 5.0, "end": 8.0, "text": "next station Bank"}]
+    ts = {0: 1.0, 1: 3.0, 2: 6.0, 3: 8.0}      # frame 3 == end boundary (exclusive)
+    out = transcribe.segments_by_frame(segs, ts)
+    assert out == {0: "mind the gap", 2: "next station Bank"}
+    assert 1 not in out and 3 not in out       # silence + exclusive end
+
+
+def test_frame_document_folds_in_speech():
+    import embed_text
+    doc = embed_text.frame_document("a platform", "VICTORIA", "mind the gap")
+    assert "platform" in doc and "VICTORIA" in doc and "mind the gap" in doc
+    # No speech -> identical to the old caption+ocr document.
+    assert embed_text.frame_document("a platform", "VICTORIA") == \
+        "a platform. VICTORIA"
+
+
+# ------------------------------------------------- M4b: face super-resolution
+def test_small_face_qualifies_by_shorter_side(monkeypatch):
+    import config
+    import detect_faces
+    monkeypatch.setattr(config, "SR_MIN_PX", 60)
+    assert detect_faces._small_face([0, 0, 45, 200]) is True    # 45px short side
+    assert detect_faces._small_face([0, 0, 80, 90]) is False
+
+
+def test_load_sr_disables_gracefully_when_model_missing(monkeypatch, tmp_path):
+    """Enabling SR without providing the model file must disable SR with a
+    warning, never crash detection."""
+    import config
+    import detect_faces
+    monkeypatch.setattr(detect_faces, "_sr_state", {})          # clear cache
+    monkeypatch.setattr(config, "SR_ENABLE", True)
+    monkeypatch.setattr(config, "SR_MODEL_PATH", tmp_path / "nope.pb")
+    assert detect_faces._load_sr() is None
+
+    monkeypatch.setattr(detect_faces, "_sr_state", {})
+    monkeypatch.setattr(config, "SR_ENABLE", False)
+    assert detect_faces._load_sr() is None

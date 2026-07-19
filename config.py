@@ -28,6 +28,7 @@ LOG_FILE = REPORT_DIR / "pipeline.log"
 # ---- Milestone 2: per-frame text, captions, metadata repository ----
 OCR_CSV = DATA / "ocr.csv"
 CAPTIONS_CSV = DATA / "captions.csv"
+TRANSCRIPT_JSON = DATA / "transcript.json"
 METADATA_CSV = DATA / "frame_metadata.csv"
 METADATA_JSON = DATA / "frame_metadata.json"
 TEXT_EMB_FILE = EMB_DIR / "text_embeddings.npz"
@@ -151,19 +152,54 @@ RECURRING_MIN_FRAMES = 5
 CONTINUITY_MAX_GAP = 3          # max frame gap between bridged tracks
 CONTINUITY_IOU = 0.5            # min bbox IoU across the gap to call it one person
 
+# ---- New capability: face super-resolution before embedding (opt-in) ----
+# Identity fragmentation is driven by faces near the detection floor: ArcFace
+# embeddings from ~45px crops are noisy, so one person splits across IDs. When
+# enabled, faces smaller than SR_MIN_PX have their crop super-resolved (OpenCV
+# dnn_superres) before the ArcFace embedding is recomputed, aiming to make small
+# faces cluster with their larger appearances. OFF by default: it changes every
+# grouping number and needs a model file, so enabling it reruns detection
+# (fingerprinted) and should be followed by re-running the eval harnesses. Any
+# SR error falls back to the normal embedding, so it can never break detection.
+SR_ENABLE = False
+SR_MIN_PX = 60                       # only super-resolve faces smaller than this
+SR_SCALE = 4                         # dnn_superres scale (2|3|4); must match model
+SR_MODEL = "fsrcnn"                  # "fsrcnn" (tiny) | "espcn" | "edsr"
+SR_MODEL_PATH = ROOT / "models" / "FSRCNN_x4.pb"   # provide this file to enable
+
 # ---- Fix #7: compute backend ----
-# CPU on Mac. CoreML was measured ~3-4x SLOWER for SCRFD here: its dynamic
-# input shapes (det [1,3,'?','?']) defeat ANE compilation and bounce ops back
-# to CPU. Only enable CUDA on a real NVIDIA box.
-USE_GPU = False                       # set True to prefer CUDA
+# Detection (SCRFD) provider. Kept a knob rather than hardcoded so the backend
+# can be changed without editing get_app(), but the default is deliberate:
+#   cpu    - fastest on Apple Silicon for THIS model. Measured best here.
+#   coreml - ~3-4x SLOWER for SCRFD: its dynamic input shapes (det [1,3,'?','?'])
+#            defeat ANE compilation and bounce ops back to CPU. Do not default to
+#            it on Mac; left available only for re-measuring if a future ORT fixes it.
+#   cuda   - only on a real NVIDIA box.
+DET_PROVIDER = "cpu"                   # "cpu" | "coreml" | "cuda"
+_PROVIDER_LISTS = {
+    "cpu": ["CPUExecutionProvider"],
+    "coreml": ["CoreMLExecutionProvider", "CPUExecutionProvider"],
+    "cuda": ["CUDAExecutionProvider", "CPUExecutionProvider"],
+}
+USE_GPU = DET_PROVIDER == "cuda"       # kept for callers that branch on it
 CTX_ID = 0 if USE_GPU else -1
-PROVIDERS = (["CUDAExecutionProvider", "CPUExecutionProvider"]
-             if USE_GPU else ["CPUExecutionProvider"])
+PROVIDERS = _PROVIDER_LISTS[DET_PROVIDER]
 
 # ---- Fix #6: reporting ----
 MAX_ANNOTATED_FRAMES = 8
 TIMELINE_W = 1100
 TIMELINE_LANE_H = 26
+
+# ---- New capability: speech transcription (faster-whisper) ----
+# Vision-only was a scope ceiling: spoken content was invisible. This stage adds
+# an audio channel that build_metadata joins on timestamp exactly like OCR. Kept
+# CPU/int8: ctranslate2 (faster-whisper's backend) has no MPS path, and int8 on
+# CPU is the practical Apple-Silicon choice. Optional -- absent faster-whisper or
+# audio, the stage skips and the pipeline runs unchanged.
+WHISPER_ENABLE = True         # set False to skip transcription entirely
+WHISPER_MODEL = "base.en"     # tiny.en|base.en|small.en|medium.en|large-v3
+WHISPER_DEVICE = "cpu"        # ctranslate2 backend: "cpu" | "cuda" (no MPS)
+WHISPER_COMPUTE = "int8"      # "int8" | "int8_float16" | "float32"
 
 # ---- Milestone 2: OCR (Tesseract via pytesseract) ----
 # Tesseract is a system binary (brew install tesseract). We keep OCR torch-free
@@ -178,6 +214,18 @@ OCR_MIN_CONF = 60       # keep tokens with confidence >= this (0-100). 60 (was 4
 OCR_MIN_TOKEN_LEN = 3   # drop tokens shorter than this; combined with the
                         # has-a-letter rule this removes "ei", "a a", stray glyphs.
 OCR_UPSCALE = 1.5       # upscale factor before thresholding (helps small text)
+
+# Parallelism: frames are independent, and Tesseract is CPU-bound, so OCR fans out
+# across cores. Each worker pins Tesseract to one thread to avoid oversubscription.
+# Purely a speed knob -- not fingerprinted, does not change output.
+import os as _os
+OCR_WORKERS = min(8, (_os.cpu_count() or 2))   # 1 = serial (used by tests)
+# Optional recall/speed trade: skip Tesseract on frames whose edge density is below
+# OCR_TEXT_EDGE_MIN (unlikely to hold signage). OFF by default -- it trades recall,
+# and OCR's whole value here is not missing platform text. Opt-in and re-check
+# eval_search OCR recall before trusting it.
+OCR_SKIP_LOW_TEXT = False
+OCR_TEXT_EDGE_MIN = 0.010     # mean Canny-edge fraction below which a frame is skipped
 
 # ---- Milestone 2: domain lexicon correction (clean noisy OCR) ----
 # Tesseract is *confidently* wrong on the stylised Underground signage in this
@@ -220,7 +268,9 @@ OCR_LEXICON_STOP = {
 CAPTION_MODEL = "Salesforce/blip-image-captioning-base"
 CAPTION_DEVICE = "auto"     # "auto" | "mps" | "cpu" | "cuda"
 CAPTION_MAX_TOKENS = 30     # max_new_tokens per caption
-CAPTION_BATCH = 1           # frames per forward pass; raise only if RAM allows
+CAPTION_BATCH = 8           # frames per batched forward pass. BLIP-base at this
+                            # batch is markedly faster on MPS than one-at-a-time and
+                            # fits in ~4-5GB; drop to 1-2 on an 8GB machine if it swaps.
 CAPTION_PROMPT = ""         # optional conditioning text (e.g. "a photo of"). Empty
                             # = unconditional captioning. Changing it re-captions.
 # When a caption mostly echoes the frame's OCR text (a title card) it is a poor
@@ -317,6 +367,13 @@ TIMELINE_JSON = DATA / "timeline.json"
 
 NARRATE_MODEL = "google/gemma-4-31b-it:free"
 NARRATE_BASE_URL = "https://openrouter.ai/api/v1"
+# Local OpenAI-compatible fallback (e.g. Ollama). When set, narration falls back
+# to it if OpenRouter has no key or its free tier is exhausted by 429s, so the
+# stage degrades to local generation instead of failing. Empty = no fallback.
+#   e.g. NARRATE_FALLBACK_BASE_URL = "http://localhost:11434/v1"
+#        NARRATE_FALLBACK_MODEL    = "llava"   (must be vision-capable for describe)
+NARRATE_FALLBACK_BASE_URL = ""
+NARRATE_FALLBACK_MODEL = ""
 NARRATE_TEMPERATURE = 0.0   # deterministic: the prompt comparison must reproduce
 NARRATE_SEED = 0
 NARRATE_MAX_TOKENS = 4096   # the ":free" variant caps completions at 8192
@@ -336,6 +393,15 @@ NARRATE_IMAGE_MAX_SIDE = 896  # downscale keyframes before base64. Gemma 4 resiz
                               # went 2.6MB -> ~0.4MB, which also makes the request
                               # far likelier to survive a congested free endpoint.
 NARRATE_CACHE = True        # replay data/llm_cache/*.json instead of re-calling
+
+# Grounding-verification pass: after generation, drop prose sentences whose
+# content words are not attested in the scene digest the story was written from,
+# converting the measured grounding metric into an enforced floor. OFF by default
+# -- it rewrites the committed stories and is a lossy edit -- so it is opt-in and
+# fingerprinted, and only condemns sentences with enough words to judge fairly.
+NARRATE_VERIFY = False
+NARRATE_VERIFY_MIN = 0.20      # drop a sentence grounding below this fraction
+NARRATE_VERIFY_MIN_WORDS = 4   # ...but only if it has >= this many content words
 NARRATE_VLM_ENABLE = True   # keyframe re-captioning (ablation + eval reference)
 NARRATE_VLM_BATCH = 6       # keyframes per vision request. Gemma 4 accepts many
                             # images per message, and the ":free" tier allows only
@@ -395,7 +461,8 @@ _STAGE_PARAMS = {
     "detect": ["FPS", "DET_SIZE", "DET_THRESH", "MIN_FACE_PX", "MODEL_PACK",
                "PROVIDERS", "HQ_DET_SCORE", "MIN_BLUR_VAR", "MAX_NOSE_OFFSET",
                "TRACK_IOU", "TRACK_MAX_GAP", "TRACK_ACTIVATION", "TRACK_HIGH_CONF",
-               "TRACK_FRAME_RATE", "TRACK_LINK_IOU"],
+               "TRACK_FRAME_RATE", "TRACK_LINK_IOU",
+               "SR_ENABLE", "SR_MIN_PX", "SR_SCALE", "SR_MODEL"],
     "recognize": ["MIN_IDENTITY_FACES",
                   "REAL_FACE_DET", "TEMPLATE_USE_QUALITY_WEIGHT",
                   "TEMPLATE_MIN_FACES_FOR_TRIM", "TEMPLATE_OUTLIER_COS",
@@ -405,6 +472,7 @@ _STAGE_PARAMS = {
     "ocr": ["FPS", "OCR_LANG", "OCR_PSM", "OCR_MIN_CONF", "OCR_MIN_TOKEN_LEN",
             "OCR_UPSCALE", "OCR_LEXICON_ENABLE", "OCR_LEXICON_CUTOFF",
             "OCR_LEXICON_MIN_LEN", "OCR_LEXICON"],
+    "transcribe": ["WHISPER_ENABLE", "WHISPER_MODEL"],
     "caption": ["FPS", "CAPTION_MODEL", "CAPTION_MAX_TOKENS", "CAPTION_PROMPT",
                 "CAPTION_ECHO_FIX", "CAPTION_RECAPTION_PROMPT",
                 "CAPTION_TEXT_ECHO_JACCARD"],
@@ -417,7 +485,9 @@ _STAGE_PARAMS = {
                  "SCENE_SIM_THRESH", "SCENE_MIN_SEC", "SCENE_TITLE_CARD_FORCE"],
     "narrate": ["NARRATE_MODEL", "NARRATE_TEMPERATURE", "NARRATE_SEED",
                 "NARRATE_MAX_TOKENS", "STORY_STRATEGIES", "STORY_STRATEGY",
-                "SCENE_SIM_THRESH", "SCENE_MIN_SEC"],
+                "SCENE_SIM_THRESH", "SCENE_MIN_SEC",
+                "NARRATE_VERIFY", "NARRATE_VERIFY_MIN",
+                "NARRATE_VERIFY_MIN_WORDS"],
 }
 
 

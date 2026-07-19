@@ -697,7 +697,7 @@ def _write_markdown(report: dict) -> None:
           "of hallucinating it, and its narrator embellishes rather than "
           "misorders. Each of those is measured above rather than assumed.", ""]
 
-    config.SYSTEM_EVAL_MD.write_text("\n".join(L))
+    util.write_text_atomic(config.SYSTEM_EVAL_MD, "\n".join(L))
 
 
 def run() -> dict:
@@ -708,8 +708,7 @@ def run() -> dict:
               "stale_inputs": stale}
 
     config.REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    with open(config.SYSTEM_EVAL_JSON, "w") as fh:
-        json.dump(report, fh, indent=2)
+    util.write_json_atomic(config.SYSTEM_EVAL_JSON, report, indent=2)
     _write_markdown(report)
 
     log.info("[system eval] %s -> %s", config.SYSTEM_EVAL_JSON.name,

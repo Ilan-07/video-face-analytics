@@ -108,9 +108,23 @@ def main():
     else:
         log.info("[skip] captions already generated")
 
+    # 7.5 Speech transcription  (new capability: audio channel). Independent of
+    #     frames/OCR; runs before the metadata join so speech joins on timestamp
+    #     and reaches the search index. Skips gracefully without faster-whisper,
+    #     ffmpeg, or an audio track, so it never blocks the vision pipeline.
+    if config.WHISPER_ENABLE and (
+            ran or _stale("transcribe", [config.TRANSCRIPT_JSON], args.force)):
+        import transcribe
+        with util.time_stage("transcribe"):
+            transcribe.run()
+        _stamp("transcribe")
+        m2_ran = True
+    elif config.WHISPER_ENABLE:
+        log.info("[skip] transcript already generated")
+
     # 8. Metadata repository  (always rebuilt: it is a cheap join of ocr.csv,
-    #    captions.csv and identities, so we never risk it going stale when an
-    #    upstream artifact is regenerated out-of-band).
+    #    captions.csv, transcript.json and identities, so we never risk it going
+    #    stale when an upstream artifact is regenerated out-of-band).
     import build_metadata
     with util.time_stage("metadata"):
         build_metadata.run()

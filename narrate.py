@@ -287,10 +287,47 @@ def _story_path(strategy: str, source: str):
     return config.REPORT_DIR / f"story_{strategy}{suffix}.md"
 
 
+_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
+def verify_grounding(story: str, digest: str) -> tuple[str, int]:
+    """Drop prose sentences the digest does not attest, enforcing the grounding
+    metric eval_story only measures. Reuses eval_story's grounding so there is one
+    definition of "attested". Markdown headings and blank lines pass through
+    untouched, and only sentences with enough content words to judge are ever
+    dropped -- a two-word aside is kept, since its score is noise. Returns the
+    filtered story and the number of sentences removed. Pure; unit-tested."""
+    import eval_story
+    kept_lines, dropped = [], 0
+    for line in story.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            kept_lines.append(line)
+            continue
+        kept = []
+        for sent in _SENT_SPLIT.split(line):
+            words = eval_story.content_words(sent)
+            if (len(words) >= config.NARRATE_VERIFY_MIN_WORDS
+                    and eval_story.grounding(sent, digest)
+                    < config.NARRATE_VERIFY_MIN):
+                dropped += 1
+                continue
+            kept.append(sent)
+        if kept:
+            kept_lines.append(" ".join(kept))
+    return "\n".join(kept_lines), dropped
+
+
 def generate_story(scenes, strategy: str, source: str = "captions") -> str:
     digest = _digest_for(scenes, source)
     raw = llm.generate(PROMPTS[strategy](digest))
     story = strip_reasoning(raw) if strategy == "chain_of_thought" else raw.strip()
+
+    if config.NARRATE_VERIFY:
+        story, dropped = verify_grounding(story, digest)
+        if dropped:
+            log.info("story [%s/%s]: grounding-verify dropped %d unsupported "
+                     "sentence(s)", strategy, source, dropped)
 
     path = _story_path(strategy, source)
     header = (f"# Story — `{strategy}` prompt, `{source}` source\n\n"

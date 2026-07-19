@@ -2,8 +2,11 @@
 import contextlib
 import json
 import logging
+import os
+import tempfile
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import cv2
 
@@ -63,10 +66,63 @@ def record_timing(stage: str, seconds: float, **meta) -> dict:
         "network": stage in config.NETWORK_STAGES,
         **meta,
     }
-    config.STAGE_TIMINGS_JSON.parent.mkdir(parents=True, exist_ok=True)
-    config.STAGE_TIMINGS_JSON.write_text(json.dumps(timings, indent=2,
-                                                    sort_keys=True))
+    write_json_atomic(config.STAGE_TIMINGS_JSON, timings, indent=2,
+                      sort_keys=True)
     return timings[stage]
+
+
+# ---------------------------------------------------------- atomic writes (M4b)
+# A pipeline stage that crashes mid-write must not leave a half-written artifact
+# that the next run reads back as valid -- a truncated frame_metadata.json or a
+# clipped timings file is worse than an absent one, because it fails silently
+# downstream instead of loudly. Every artifact write goes through a temp file in
+# the same directory, flushed and fsync'd, then os.replace'd into place. replace
+# is atomic on the same filesystem, so a reader sees either the old file or the
+# complete new one, never a partial.
+def write_text_atomic(path, text: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def write_json_atomic(path, obj, **dumps_kwargs) -> None:
+    write_text_atomic(path, json.dumps(obj, **dumps_kwargs))
+
+
+def write_csv_atomic(path, df, **to_csv_kwargs) -> None:
+    """Atomic DataFrame->CSV. pandas writes the temp path, then we replace."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    os.close(fd)
+    try:
+        df.to_csv(tmp, **to_csv_kwargs)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def require_columns(df, columns, name: str) -> None:
+    """Raise a clear error if a loaded artifact is missing columns a downstream
+    stage depends on -- turns a cryptic KeyError three stages later into an
+    immediate, named failure at the seam."""
+    missing = [c for c in columns if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"{name} is missing required column(s) {missing}; "
+            f"has {list(df.columns)}. Rebuild it with run_pipeline.py.")
 
 
 @contextlib.contextmanager
