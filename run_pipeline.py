@@ -34,14 +34,16 @@ def main():
     ran = args.force or not any(config.VIDEO_DIR.glob("video.*"))
     if ran:
         import download
-        download.download(args.url)
+        with util.time_stage("download"):
+            download.download(args.url)
     else:
         log.info("[skip] video already downloaded")
 
     # 2. Frames  (rerun if upstream ran or FPS changed)
     if ran or _stale("extract", [config.FRAMES_CSV], args.force):
         import extract_frames
-        extract_frames.extract()
+        with util.time_stage("extract"):
+            extract_frames.extract()
         _stamp("extract")
         ran = True
     else:
@@ -50,7 +52,8 @@ def main():
     # 3. Detect + track  (rerun if upstream ran or detection config changed)
     if ran or _stale("detect", [config.FACES_CSV, config.EMB_FILE], args.force):
         import detect_faces
-        detect_faces.detect()
+        with util.time_stage("detect"):
+            detect_faces.detect()
         _stamp("detect")
         ran = True
     else:
@@ -60,24 +63,35 @@ def main():
     #     linking). Gated by APPEARANCE_ENABLE; feeds recognize when present.
     if config.APPEARANCE_ENABLE:
         if ran or _stale("appearance", [config.APPEARANCE_FILE], args.force):
-            import appearance
-            appearance.compute()
-            _stamp("appearance")
-            ran = True
+            # torchreid is an optional dependency; if it (or its weights) is
+            # missing, skip appearance rather than crash -- recognize already
+            # falls back to face-only when no templates are present.
+            try:
+                import appearance
+                with util.time_stage("appearance"):
+                    appearance.compute()
+                _stamp("appearance")
+                ran = True
+            except (ImportError, RuntimeError) as e:
+                log.warning("[skip] appearance re-ID unavailable (%s); "
+                            "grouping falls back to face-only. Install it with "
+                            "requirements-appearance.txt.", e)
         else:
             log.info("[skip] appearance templates already computed")
 
     # 4. Recognize / cluster  (rerun if upstream ran or clustering config changed)
     if ran or _stale("recognize", [config.IDENTITIES_CSV], args.force):
         import recognize
-        recognize.cluster()
+        with util.time_stage("recognize"):
+            recognize.cluster()
         _stamp("recognize")
     else:
         log.info("[skip] identities already clustered")
 
     # 5. Analytics
     import analytics
-    summary = analytics.run()
+    with util.time_stage("analytics"):
+        summary = analytics.run()
 
     # ---- Milestone 2: per-frame text, captions, metadata repository ----
     m2_ran = False
@@ -85,7 +99,8 @@ def main():
     # 6. OCR  (rerun if frames changed or OCR config changed)
     if ran or _stale("ocr", [config.OCR_CSV], args.force):
         import ocr
-        ocr.run()
+        with util.time_stage("ocr"):
+            ocr.run()
         _stamp("ocr")
         m2_ran = True
     else:
@@ -94,23 +109,40 @@ def main():
     # 7. Captions  (rerun if frames changed or caption config changed)
     if ran or _stale("caption", [config.CAPTIONS_CSV], args.force):
         import caption
-        caption.run()
+        with util.time_stage("caption"):
+            caption.run()
         _stamp("caption")
         m2_ran = True
     else:
         log.info("[skip] captions already generated")
 
+    # 7.5 Speech transcription  (new capability: audio channel). Independent of
+    #     frames/OCR; runs before the metadata join so speech joins on timestamp
+    #     and reaches the search index. Skips gracefully without faster-whisper,
+    #     ffmpeg, or an audio track, so it never blocks the vision pipeline.
+    if config.WHISPER_ENABLE and (
+            ran or _stale("transcribe", [config.TRANSCRIPT_JSON], args.force)):
+        import transcribe
+        with util.time_stage("transcribe"):
+            transcribe.run()
+        _stamp("transcribe")
+        m2_ran = True
+    elif config.WHISPER_ENABLE:
+        log.info("[skip] transcript already generated")
+
     # 8. Metadata repository  (always rebuilt: it is a cheap join of ocr.csv,
-    #    captions.csv and identities, so we never risk it going stale when an
-    #    upstream artifact is regenerated out-of-band).
+    #    captions.csv, transcript.json and identities, so we never risk it going
+    #    stale when an upstream artifact is regenerated out-of-band).
     import build_metadata
-    build_metadata.run()
+    with util.time_stage("metadata"):
+        build_metadata.run()
     _stamp("metadata")
 
     # 9. Semantic index  (rerun if text changed or the embed model changed)
     if ran or m2_ran or _stale("embed", [config.TEXT_EMB_FILE], args.force):
         import embed_text
-        embed_text.run()
+        with util.time_stage("embed"):
+            embed_text.run()
         _stamp("embed")
     else:
         log.info("[skip] semantic index already built")
@@ -120,7 +152,8 @@ def main():
     img_ran = False
     if ran or _stale("embed_image", [config.IMAGE_EMB_FILE], args.force):
         import embed_image
-        embed_image.run()
+        with util.time_stage("embed_image"):
+            embed_image.run()
         _stamp("embed_image")
         img_ran = True     # scene segmentation reads this index -- cascade to M3
     else:
@@ -132,7 +165,8 @@ def main():
     # 10. Scene segmentation  (offline; cuts on the CLIP index + title cards)
     if ran or img_ran or _stale("scenes", [config.SCENES_JSON], args.force):
         import scenes
-        scenes.run()
+        with util.time_stage("scenes"):
+            scenes.run()
         _stamp("scenes")
         m3_ran = True
     else:
@@ -154,7 +188,8 @@ def main():
             if m3_ran or _stale("describe", [config.SCENE_DESC_JSON], args.force):
                 import describe_scenes
                 try:
-                    describe_scenes.run()
+                    with util.time_stage("describe"):
+                        describe_scenes.run()
                     _stamp("describe")
                 except RuntimeError as e:
                     log.warning("[skip] scene descriptions: %s", e)
@@ -166,7 +201,8 @@ def main():
                             args.force):
             import narrate
             try:
-                narrate.run(all_strategies=True)
+                with util.time_stage("narrate"):
+                    narrate.run(all_strategies=True)
                 _stamp("narrate")
             except RuntimeError as e:
                 log.warning("[skip] narration: %s", e)
@@ -178,13 +214,22 @@ def main():
     #     and event_description columns into the repository. (It ran at stage 8
     #     too, because embed_text reads frame_metadata.csv and must not wait on
     #     stages that depend on the CLIP index it precedes.)
-    build_metadata.run()
+    with util.time_stage("metadata"):
+        build_metadata.run()
     _stamp("metadata")
 
     # 13. Evaluation (Fix #3)
     if not args.no_eval:
         import eval as evaluation
-        evaluation.run()
+        with util.time_stage("eval"):
+            evaluation.run()
+
+    # 14. System evaluation (Milestone 4 Task 4). Rolls the stage timings above
+    #     together with every milestone's accuracy harness into one report. It
+    #     only reads artifacts, so it is cheap and always runs -- but it must come
+    #     last, since it reports on the stages before it.
+    import eval_system
+    eval_system.run()
 
     mf = summary["most_frequent_face"]
     log.info("=== RESULTS ===")

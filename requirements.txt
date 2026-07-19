@@ -23,3 +23,13 @@ sentence-transformers>=2.6.0
 # The OpenRouter endpoint is OpenAI-compatible, so plain HTTP is enough — no SDK.
 # NOTE: generating needs OPENROUTER_API_KEY; replaying data/llm_cache/ does not.
 requests>=2.31.0
+
+# Milestone 4: speech transcription (optional audio channel).
+# NOTE: transcribe.py also needs the ffmpeg binary (macOS: `brew install ffmpeg`).
+# Absent this package the transcription stage skips gracefully.
+faster-whisper>=1.0.0
+
+# Optional: face super-resolution (config.SR_ENABLE). dnn_superres lives in the
+# contrib build, which CONFLICTS with opencv-python — install only if using SR,
+# and provide the model file at config.SR_MODEL_PATH:
+#   pip uninstall opencv-python && pip install opencv-contrib-python

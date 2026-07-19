@@ -28,6 +28,7 @@ LOG_FILE = REPORT_DIR / "pipeline.log"
 # ---- Milestone 2: per-frame text, captions, metadata repository ----
 OCR_CSV = DATA / "ocr.csv"
 CAPTIONS_CSV = DATA / "captions.csv"
+TRANSCRIPT_JSON = DATA / "transcript.json"
 METADATA_CSV = DATA / "frame_metadata.csv"
 METADATA_JSON = DATA / "frame_metadata.json"
 TEXT_EMB_FILE = EMB_DIR / "text_embeddings.npz"
@@ -88,7 +89,7 @@ TEMPLATE_OUTLIER_COS = 0.40          # drop a face whose cosine to track mean < 
 # (the eps=0.55 failure) -- and is blocked by co-occurrence cannot-link: two
 # clusters that ever share a frame are different people and never merge.
 CLUSTER_LINK_ENABLE = True
-CLUSTER_LINK_DIST = 0.50             # the clustering distance ceiling. Complete
+CLUSTER_LINK_DIST = 0.55             # the clustering distance ceiling. Complete
                                      # linkage means every member pair is within
                                      # this, so clusters stay coherent (top-cluster
                                      # within-cosine ~0.73); 0.55+ starts merging
@@ -102,7 +103,7 @@ CLUSTER_LINK_DIST = 0.50             # the clustering distance ceiling. Complete
 # not cohesion -- is the validator here.
 BEST_SHOT_ENABLE = True
 BEST_SHOT_K = 3          # top-quality prototype faces compared per cluster
-BEST_SHOT_DIST = 0.50    # cosine-distance ceiling. Complete-linkage on best shots
+BEST_SHOT_DIST = 0.55    # cosine-distance ceiling. Complete-linkage on best shots
                          # (all prototype pairs must pass) lets this be loose enough
                          # to consolidate a person's FRONTAL clusters across scene
                          # cuts without chaining different people.
@@ -112,7 +113,15 @@ BEST_SHOT_DIST = 0.50    # cosine-distance ceiling. Complete-linkage on best sho
 # of face pose. Requires torchreid (extra dep); off by default. When enabled,
 # appearance.py embeds body crops and recognize fuses them -- allowing a looser
 # face match when clothing agrees. See appearance.py.
-APPEARANCE_ENABLE = False       # optional; needs requirements-appearance.txt
+APPEARANCE_ENABLE = True        # orthogonal body-ReID linking; needs
+                                # requirements-appearance.txt (torchreid). The
+                                # pipeline degrades to face-only if it is missing.
+                                # Measured win over face-only: with the face gate
+                                # below at 0.65 it lifts completeness 0.902->0.912
+                                # and recall 0.616->0.678 while HOLDING homogeneity
+                                # (0.956->0.953) -- better than loosening the face
+                                # ceiling alone, because the body match blocks the
+                                # false merges that pure face-loosening introduces.
 # Clothing-focused body crop: the torso BELOW the chin (head is already the face),
 # narrowed to suppress side-background -- shared backgrounds are the main cause of
 # clothing false-matches (e.g. dark seats in a transit scene).
@@ -120,9 +129,12 @@ BODY_W_SCALE = 2.4              # torso width as a multiple of face width
 BODY_DOWN_SCALE = 5.0          # torso height below the chin, in face-heights
 APPEARANCE_DIST = 0.25          # body-appearance cosine-distance ceiling (tight:
                                 # similar outfits in a shared setting false-match)
-APPEARANCE_FACE_DIST = 0.55     # looser-than-face-clustering ceiling allowed when
-                                # clothing agrees; complete-linkage so all best-shot
-                                # pairs must pass (no chaining into mixed clusters)
+APPEARANCE_FACE_DIST = 0.65     # face-distance ceiling allowed when clothing agrees.
+                                # MUST exceed CLUSTER_LINK_DIST (0.55) to add anything
+                                # -- below it the face clustering has already merged
+                                # the pair. 0.65 lets a body match bridge the 0.55-0.65
+                                # face-pose gap; complete-linkage so all best-shot pairs
+                                # must pass (no chaining into mixed clusters)
 APPEARANCE_FILE = EMB_DIR / "appearance.npz"
 
 # ---- False-positive backstop ----
@@ -151,19 +163,70 @@ RECURRING_MIN_FRAMES = 5
 CONTINUITY_MAX_GAP = 3          # max frame gap between bridged tracks
 CONTINUITY_IOU = 0.5            # min bbox IoU across the gap to call it one person
 
+# ---- New capability: face super-resolution before embedding (opt-in) ----
+# Identity fragmentation is driven by faces near the detection floor: ArcFace
+# embeddings from ~45px crops are noisy, so one person splits across IDs. When
+# enabled, faces smaller than SR_MIN_PX have their crop super-resolved (OpenCV
+# dnn_superres) before the ArcFace embedding is recomputed, aiming to make small
+# faces cluster with their larger appearances. OFF by default: it changes every
+# grouping number and needs a model file, so enabling it reruns detection
+# (fingerprinted) and should be followed by re-running the eval harnesses. Any
+# SR error falls back to the normal embedding, so it can never break detection.
+SR_ENABLE = False
+SR_MIN_PX = 60                       # only super-resolve faces smaller than this
+SR_SCALE = 4                         # dnn_superres scale (2|3|4); must match model
+SR_MODEL = "fsrcnn"                  # "fsrcnn" (tiny) | "espcn" | "edsr"
+SR_MODEL_PATH = ROOT / "models" / "FSRCNN_x4.pb"   # provide this file to enable
+
 # ---- Fix #7: compute backend ----
-# CPU on Mac. CoreML was measured ~3-4x SLOWER for SCRFD here: its dynamic
-# input shapes (det [1,3,'?','?']) defeat ANE compilation and bounce ops back
-# to CPU. Only enable CUDA on a real NVIDIA box.
-USE_GPU = False                       # set True to prefer CUDA
+# Detection (SCRFD) provider. Kept a knob rather than hardcoded so the backend
+# can be changed without editing get_app(), but the default is deliberate:
+#   cpu    - fastest on Apple Silicon for THIS model. Measured best here.
+#   coreml - ~3-4x SLOWER for SCRFD: its dynamic input shapes (det [1,3,'?','?'])
+#            defeat ANE compilation and bounce ops back to CPU. Do not default to
+#            it on Mac; left available only for re-measuring if a future ORT fixes it.
+#   cuda   - only on a real NVIDIA box.
+DET_PROVIDER = "cpu"                   # "cpu" | "coreml" | "cuda"
+_PROVIDER_LISTS = {
+    "cpu": ["CPUExecutionProvider"],
+    "coreml": ["CoreMLExecutionProvider", "CPUExecutionProvider"],
+    "cuda": ["CUDAExecutionProvider", "CPUExecutionProvider"],
+}
+USE_GPU = DET_PROVIDER == "cuda"       # kept for callers that branch on it
 CTX_ID = 0 if USE_GPU else -1
-PROVIDERS = (["CUDAExecutionProvider", "CPUExecutionProvider"]
-             if USE_GPU else ["CPUExecutionProvider"])
+PROVIDERS = _PROVIDER_LISTS[DET_PROVIDER]
 
 # ---- Fix #6: reporting ----
 MAX_ANNOTATED_FRAMES = 8
 TIMELINE_W = 1100
 TIMELINE_LANE_H = 26
+
+# ---- New capability: speech transcription (faster-whisper) ----
+# Vision-only was a scope ceiling: spoken content was invisible. This stage adds
+# an audio channel that build_metadata joins on timestamp exactly like OCR. Kept
+# CPU/int8: ctranslate2 (faster-whisper's backend) has no MPS path, and int8 on
+# CPU is the practical Apple-Silicon choice. Optional -- absent faster-whisper or
+# audio, the stage skips and the pipeline runs unchanged.
+WHISPER_ENABLE = True         # set False to skip transcription entirely
+WHISPER_MODEL = "base.en"     # tiny.en|base.en|small.en|medium.en|large-v3
+WHISPER_DEVICE = "cpu"        # ctranslate2 backend: "cpu" | "cuda" (no MPS)
+WHISPER_COMPUTE = "int8"      # "int8" | "int8_float16" | "float32"
+# Hallucination control, tuned against this footage. Without help, Whisper emits
+# "You" over silence and loops a mis-heard phrase over minutes of train noise.
+# Measured here: Silero VAD is too aggressive -- it drops the faint platform PA
+# along with the noise (0 segments) -- so it is OFF by default and left as an
+# option for cleaner audio. What works instead: disable context-conditioning to
+# break repetition loops, then drop pure-filler segments and any text that repeats
+# implausibly often (a real announcement varies; a hallucination loops verbatim).
+WHISPER_VAD = False           # Silero voice-activity filter; too aggressive here
+# Left ON (Whisper's default): measured, it makes hallucinations loop the SAME
+# phrase verbatim, which clean_segments removes cleanly by repeat count. Turning
+# it off scattered the hallucinations into varied one-offs that no filter catches
+# without also dropping real speech -- worse, not better.
+WHISPER_CONDITION_ON_PREV = True
+WHISPER_MAX_REPEAT = 6        # drop any transcript text repeated >= this many times
+WHISPER_FILLER = {"you", "thank you", "thanks for watching", "bye", "the end",
+                  "thank you.", "you.", "."}   # canonical silence-hallucinations
 
 # ---- Milestone 2: OCR (Tesseract via pytesseract) ----
 # Tesseract is a system binary (brew install tesseract). We keep OCR torch-free
@@ -178,6 +241,18 @@ OCR_MIN_CONF = 60       # keep tokens with confidence >= this (0-100). 60 (was 4
 OCR_MIN_TOKEN_LEN = 3   # drop tokens shorter than this; combined with the
                         # has-a-letter rule this removes "ei", "a a", stray glyphs.
 OCR_UPSCALE = 1.5       # upscale factor before thresholding (helps small text)
+
+# Parallelism: frames are independent, and Tesseract is CPU-bound, so OCR fans out
+# across cores. Each worker pins Tesseract to one thread to avoid oversubscription.
+# Purely a speed knob -- not fingerprinted, does not change output.
+import os as _os
+OCR_WORKERS = min(8, (_os.cpu_count() or 2))   # 1 = serial (used by tests)
+# Optional recall/speed trade: skip Tesseract on frames whose edge density is below
+# OCR_TEXT_EDGE_MIN (unlikely to hold signage). OFF by default -- it trades recall,
+# and OCR's whole value here is not missing platform text. Opt-in and re-check
+# eval_search OCR recall before trusting it.
+OCR_SKIP_LOW_TEXT = False
+OCR_TEXT_EDGE_MIN = 0.010     # mean Canny-edge fraction below which a frame is skipped
 
 # ---- Milestone 2: domain lexicon correction (clean noisy OCR) ----
 # Tesseract is *confidently* wrong on the stylised Underground signage in this
@@ -220,7 +295,9 @@ OCR_LEXICON_STOP = {
 CAPTION_MODEL = "Salesforce/blip-image-captioning-base"
 CAPTION_DEVICE = "auto"     # "auto" | "mps" | "cpu" | "cuda"
 CAPTION_MAX_TOKENS = 30     # max_new_tokens per caption
-CAPTION_BATCH = 1           # frames per forward pass; raise only if RAM allows
+CAPTION_BATCH = 8           # frames per batched forward pass. BLIP-base at this
+                            # batch is markedly faster on MPS than one-at-a-time and
+                            # fits in ~4-5GB; drop to 1-2 on an 8GB machine if it swaps.
 CAPTION_PROMPT = ""         # optional conditioning text (e.g. "a photo of"). Empty
                             # = unconditional captioning. Changing it re-captions.
 # When a caption mostly echoes the frame's OCR text (a title card) it is a poor
@@ -257,6 +334,10 @@ CLIP_DEVICE = "auto"           # "auto" | "mps" | "cpu" | "cuda"
 IMAGE_EMB_FILE = EMB_DIR / "image_embeddings.npz"
 VISUAL_TOP_K = 20              # default max results for a visual query
 VISUAL_MIN_SCORE = 0.20        # drop matches below this CLIP cosine similarity
+
+# ---- Reciprocal Rank Fusion (semantic + visual) ----
+FUSION_RRF_K = 60             # RRF damping; 60 is the canonical Cormack et al. value
+FUSION_POOL = 50             # candidate depth pulled from each ranker before fusing
 
 # ---- Milestone 2: search-quality evaluation ----
 # make_search_labelsheet.py samples frames into SEARCH_LABELS_CSV for a human to
@@ -313,6 +394,13 @@ TIMELINE_JSON = DATA / "timeline.json"
 
 NARRATE_MODEL = "google/gemma-4-31b-it:free"
 NARRATE_BASE_URL = "https://openrouter.ai/api/v1"
+# Local OpenAI-compatible fallback (e.g. Ollama). When set, narration falls back
+# to it if OpenRouter has no key or its free tier is exhausted by 429s, so the
+# stage degrades to local generation instead of failing. Empty = no fallback.
+#   e.g. NARRATE_FALLBACK_BASE_URL = "http://localhost:11434/v1"
+#        NARRATE_FALLBACK_MODEL    = "llava"   (must be vision-capable for describe)
+NARRATE_FALLBACK_BASE_URL = ""
+NARRATE_FALLBACK_MODEL = ""
 NARRATE_TEMPERATURE = 0.0   # deterministic: the prompt comparison must reproduce
 NARRATE_SEED = 0
 NARRATE_MAX_TOKENS = 4096   # the ":free" variant caps completions at 8192
@@ -332,6 +420,15 @@ NARRATE_IMAGE_MAX_SIDE = 896  # downscale keyframes before base64. Gemma 4 resiz
                               # went 2.6MB -> ~0.4MB, which also makes the request
                               # far likelier to survive a congested free endpoint.
 NARRATE_CACHE = True        # replay data/llm_cache/*.json instead of re-calling
+
+# Grounding-verification pass: after generation, drop prose sentences whose
+# content words are not attested in the scene digest the story was written from,
+# converting the measured grounding metric into an enforced floor. OFF by default
+# -- it rewrites the committed stories and is a lossy edit -- so it is opt-in and
+# fingerprinted, and only condemns sentences with enough words to judge fairly.
+NARRATE_VERIFY = False
+NARRATE_VERIFY_MIN = 0.20      # drop a sentence grounding below this fraction
+NARRATE_VERIFY_MIN_WORDS = 4   # ...but only if it has >= this many content words
 NARRATE_VLM_ENABLE = True   # keyframe re-captioning (ablation + eval reference)
 NARRATE_VLM_BATCH = 6       # keyframes per vision request. Gemma 4 accepts many
                             # images per message, and the ":free" tier allows only
@@ -356,6 +453,22 @@ STORY_EVAL_NGRAM = 3          # n for the distinct-n-gram redundancy ratio
 STORY_GROUND_MIN_LEN = 4      # ignore content words shorter than this
 VIDEO_DURATION_SEC = 1415.5   # upper bound for timeline timestamp validation
 
+# ---- Milestone 4: end-to-end integration and system evaluation ----
+# run_pipeline times every stage through util.time_stage and merges the result
+# into STAGE_TIMINGS_JSON. The merge matters: the pipeline is idempotent, so a
+# second run skips almost every stage and would otherwise erase the cold-run
+# cost that is the only honest answer to "how long does this system take?".
+# Each stage therefore keeps its last MEASURED duration until it actually reruns.
+STAGE_TIMINGS_JSON = DATA / "stage_timings.json"
+SYSTEM_EVAL_JSON = REPORT_DIR / "eval_system.json"
+SYSTEM_EVAL_MD = REPORT_DIR / "eval_system.md"
+
+# Stages that call a network LLM. Their wall-clock is dominated by OpenRouter
+# free-tier queueing and 429 backoff, not by our compute, so eval_system reports
+# them separately -- averaging them into a per-frame throughput number would
+# describe someone else's rate limiter rather than this pipeline.
+NETWORK_STAGES = {"describe", "narrate"}
+
 # InsightFace model bundle (SCRFD detector + ArcFace recog + gender/age)
 MODEL_PACK = "buffalo_l"
 
@@ -375,7 +488,8 @@ _STAGE_PARAMS = {
     "detect": ["FPS", "DET_SIZE", "DET_THRESH", "MIN_FACE_PX", "MODEL_PACK",
                "PROVIDERS", "HQ_DET_SCORE", "MIN_BLUR_VAR", "MAX_NOSE_OFFSET",
                "TRACK_IOU", "TRACK_MAX_GAP", "TRACK_ACTIVATION", "TRACK_HIGH_CONF",
-               "TRACK_FRAME_RATE", "TRACK_LINK_IOU"],
+               "TRACK_FRAME_RATE", "TRACK_LINK_IOU",
+               "SR_ENABLE", "SR_MIN_PX", "SR_SCALE", "SR_MODEL"],
     "recognize": ["MIN_IDENTITY_FACES",
                   "REAL_FACE_DET", "TEMPLATE_USE_QUALITY_WEIGHT",
                   "TEMPLATE_MIN_FACES_FOR_TRIM", "TEMPLATE_OUTLIER_COS",
@@ -385,6 +499,8 @@ _STAGE_PARAMS = {
     "ocr": ["FPS", "OCR_LANG", "OCR_PSM", "OCR_MIN_CONF", "OCR_MIN_TOKEN_LEN",
             "OCR_UPSCALE", "OCR_LEXICON_ENABLE", "OCR_LEXICON_CUTOFF",
             "OCR_LEXICON_MIN_LEN", "OCR_LEXICON"],
+    "transcribe": ["WHISPER_ENABLE", "WHISPER_MODEL", "WHISPER_VAD",
+                   "WHISPER_CONDITION_ON_PREV"],
     "caption": ["FPS", "CAPTION_MODEL", "CAPTION_MAX_TOKENS", "CAPTION_PROMPT",
                 "CAPTION_ECHO_FIX", "CAPTION_RECAPTION_PROMPT",
                 "CAPTION_TEXT_ECHO_JACCARD"],
@@ -397,7 +513,9 @@ _STAGE_PARAMS = {
                  "SCENE_SIM_THRESH", "SCENE_MIN_SEC", "SCENE_TITLE_CARD_FORCE"],
     "narrate": ["NARRATE_MODEL", "NARRATE_TEMPERATURE", "NARRATE_SEED",
                 "NARRATE_MAX_TOKENS", "STORY_STRATEGIES", "STORY_STRATEGY",
-                "SCENE_SIM_THRESH", "SCENE_MIN_SEC"],
+                "SCENE_SIM_THRESH", "SCENE_MIN_SEC",
+                "NARRATE_VERIFY", "NARRATE_VERIFY_MIN",
+                "NARRATE_VERIFY_MIN_WORDS"],
 }
 
 

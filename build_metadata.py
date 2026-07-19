@@ -79,6 +79,20 @@ def _event_descriptions(timestamps) -> dict:
     return out
 
 
+def _speech_fields(timestamps) -> dict:
+    """frame_id -> speech spoken at that frame, from transcript.json, or {} when
+    the (optional) transcription stage has not run. Delegates the interval join
+    to transcribe.segments_by_frame so there is one definition of the mapping."""
+    if not config.TRANSCRIPT_JSON.exists():
+        return {}
+    with open(config.TRANSCRIPT_JSON) as f:
+        segments = json.load(f).get("segments", [])
+    if not segments:
+        return {}
+    import transcribe
+    return transcribe.segments_by_frame(segments, timestamps)
+
+
 def run() -> int:
     config.ensure_dirs()
     frames = pd.read_csv(config.FRAMES_CSV)
@@ -105,6 +119,8 @@ def run() -> int:
     ts_map = {int(r.frame_id): float(r.timestamp_sec)
               for r in df.itertuples(index=False)}
     event_map = _event_descriptions(ts_map)
+    speech_map = _speech_fields(ts_map)
+    df["speech"] = df["frame_id"].map(lambda fid: speech_map.get(int(fid), ""))
     df["scene_index"] = df["frame_id"].map(
         lambda fid: scene_map.get(int(fid), (None, ""))[0])
     df["story_segment"] = df["frame_id"].map(
@@ -122,6 +138,7 @@ def run() -> int:
             "face_ids": r.face_ids,
             "ocr_text": r.ocr_text,
             "caption": r.caption,
+            "speech": r.speech,
             "caption_echoes_text": bool(r.caption_echoes_text),
             # Milestone 3 (Task 4: metadata enhancement). pandas turns a column of
             # Nones into object dtype but a *partially* covered one into float
@@ -131,15 +148,14 @@ def run() -> int:
             "story_segment": r.story_segment,
             "event_description": r.event_description,
         })
-    with open(config.METADATA_JSON, "w") as f:
-        json.dump(records, f, indent=2)
+    util.write_json_atomic(config.METADATA_JSON, records, indent=2)
 
     # CSV: face_ids pipe-joined for spreadsheet friendliness.
     csv_df = df[["frame_id", "timestamp_sec", "filename", "face_ids",
-                 "ocr_text", "caption", "caption_echoes_text",
+                 "ocr_text", "caption", "speech", "caption_echoes_text",
                  "scene_index", "story_segment", "event_description"]].copy()
     csv_df["face_ids"] = csv_df["face_ids"].map(lambda ids: "|".join(ids))
-    csv_df.to_csv(config.METADATA_CSV, index=False)
+    util.write_csv_atomic(config.METADATA_CSV, csv_df, index=False)
 
     n_faces = sum(1 for r in records if r["face_ids"])
     n_text = sum(1 for r in records if r["ocr_text"])

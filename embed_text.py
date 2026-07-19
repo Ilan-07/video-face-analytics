@@ -43,10 +43,13 @@ def load_model():
     return SentenceTransformer(config.TEXT_EMBED_MODEL, device=device)
 
 
-def frame_document(caption: str, ocr_text: str) -> str:
-    """The text embedded per frame: caption + OCR text (scene meaning + literal
-    on-screen text). Empty parts are dropped."""
-    parts = [p.strip() for p in (caption, ocr_text) if p and str(p).strip()]
+def frame_document(caption: str, ocr_text: str, speech: str = "") -> str:
+    """The text embedded per frame: caption + OCR text + transcribed speech
+    (scene meaning + literal on-screen text + what was said). Empty parts are
+    dropped, so a frame with no audio embeds exactly as before -- speech only
+    widens the document when transcription has run."""
+    parts = [p.strip() for p in (caption, ocr_text, speech)
+             if p and str(p).strip()]
     return ". ".join(parts)
 
 
@@ -62,8 +65,9 @@ def run() -> int:
 
     config.ensure_dirs()
     meta = pd.read_csv(config.METADATA_CSV).fillna("")
-    docs = [frame_document(c, t)
-            for c, t in zip(meta["caption"], meta["ocr_text"])]
+    speech = meta["speech"] if "speech" in meta.columns else [""] * len(meta)
+    docs = [frame_document(c, t, sp)
+            for c, t, sp in zip(meta["caption"], meta["ocr_text"], speech)]
 
     model = load_model()
     log.info("embedding %d frame documents", len(docs))

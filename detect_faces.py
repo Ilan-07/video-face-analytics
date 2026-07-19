@@ -41,6 +41,69 @@ def read_frames_index():
         return list(csv.DictReader(f))
 
 
+_sr_state: dict = {}
+
+
+def _load_sr():
+    """OpenCV dnn_superres upscaler, or None when SR is off/unavailable (cached).
+
+    Never raises: a missing model file or an OpenCV build without the contrib
+    dnn_superres module disables SR with a warning rather than failing detection."""
+    if "sr" in _sr_state:
+        return _sr_state["sr"]
+    sr = None
+    if config.SR_ENABLE:
+        if not config.SR_MODEL_PATH.exists():
+            log.warning("[sr] SR_ENABLE set but model missing at %s -- SR disabled",
+                        config.SR_MODEL_PATH)
+        else:
+            try:
+                sr = cv2.dnn_superres.DnnSuperResImpl_create()
+                sr.readModel(str(config.SR_MODEL_PATH))
+                sr.setModel(config.SR_MODEL, config.SR_SCALE)
+                log.info("[sr] %s x%d for faces < %dpx",
+                         config.SR_MODEL, config.SR_SCALE, config.SR_MIN_PX)
+            except Exception as e:  # noqa: BLE001
+                log.warning("[sr] load failed (%s) -- SR disabled", e)
+                sr = None
+    _sr_state["sr"] = sr
+    return sr
+
+
+def _small_face(bbox) -> bool:
+    """A face near the detection floor, where SR is worth the extra compute."""
+    x1, y1, x2, y2 = bbox
+    return min(x2 - x1, y2 - y1) < config.SR_MIN_PX
+
+
+def _sr_embedding(img, face, bbox, sr, rec):
+    """ArcFace embedding recomputed from a super-resolved crop of a small face.
+
+    Returns None on any failure so the caller falls back to the plain embedding;
+    SR is an optimisation and must never break detection. The crop is padded so
+    all five landmarks stay in frame, the landmarks are scaled into the upsampled
+    crop, then the recognition model re-embeds the realigned 112px face."""
+    try:
+        from insightface.utils import face_align
+        x1, y1, x2, y2 = bbox
+        w, h = x2 - x1, y2 - y1
+        px, py = int(w * 0.4), int(h * 0.4)
+        cx1, cy1 = max(0, x1 - px), max(0, y1 - py)
+        cx2, cy2 = min(img.shape[1], x2 + px), min(img.shape[0], y2 + py)
+        crop = img[cy1:cy2, cx1:cx2]
+        if crop.size == 0:
+            return None
+        crop_sr = sr.upsample(crop)
+        kps_sr = (face.kps - np.array([cx1, cy1])) * config.SR_SCALE
+        aimg = face_align.norm_crop(crop_sr, kps_sr, image_size=112)
+        feat = rec.get_feat(aimg).flatten().astype(np.float32)
+        n = float(np.linalg.norm(feat))
+        return feat / n if n > 0 else None
+    except Exception as e:  # noqa: BLE001
+        log.debug("[sr] embedding failed, using plain embedding: %s", e)
+        return None
+
+
 def _make_tracker() -> ByteTrackTracker:
     return ByteTrackTracker(
         frame_rate=config.TRACK_FRAME_RATE,
@@ -89,6 +152,8 @@ def _reconcile(records: list[dict]) -> dict[str, str]:
 def detect() -> int:
     config.ensure_dirs()
     app = get_app()
+    sr = _load_sr()
+    rec = app.models.get("recognition") if sr is not None else None
     rows = read_frames_index()
     tracker = _make_tracker()
 
@@ -133,7 +198,12 @@ def detect() -> int:
             aligned = face_align.norm_crop(img, face.kps, image_size=112)
             cv2.imwrite(str(config.FACE_DIR / f"{crop_id}.jpg"), aligned)
 
-            embeddings[crop_id] = face.normed_embedding.astype(np.float32)
+            emb = None
+            if sr is not None and rec is not None and _small_face(bbox):
+                emb = _sr_embedding(img, face, bbox, sr, rec)
+            if emb is None:
+                emb = face.normed_embedding.astype(np.float32)
+            embeddings[crop_id] = emb
             records.append({
                 "crop_id": crop_id, "frame_id": frame_id,
                 "timestamp_sec": row["timestamp_sec"], "bbox": bbox,

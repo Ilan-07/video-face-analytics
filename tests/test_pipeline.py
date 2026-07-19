@@ -876,3 +876,497 @@ def test_parse_batch_survives_fences_and_junk():
     assert parse_batch(fenced, {5}) == {5: "A tunnel."}
     assert parse_batch("the model refused to emit json", {5}) == {}
     assert parse_batch('[{"scene_index": "not an int", "description": "x"}]', {5}) == {}
+
+
+# ------------------------------------------------- M4: stage timing (util)
+def _isolate_timings(monkeypatch, tmp_path):
+    """Point the timings file at a tmp dir so tests never touch data/."""
+    import config
+    monkeypatch.setattr(config, "STAGE_TIMINGS_JSON",
+                        tmp_path / "stage_timings.json")
+
+
+def test_record_timing_roundtrips(monkeypatch, tmp_path):
+    import util
+    _isolate_timings(monkeypatch, tmp_path)
+    util.record_timing("detect", 12.345)
+    assert util.load_timings()["detect"]["seconds"] == 12.345
+
+
+def test_timings_merge_so_a_skipped_stage_keeps_its_measurement(
+        monkeypatch, tmp_path):
+    """The central design claim: the pipeline is idempotent, so on a second run
+    most stages skip and record nothing. The timings file must still describe a
+    full cold build, which means a new measurement merges into the old ones
+    rather than replacing the file."""
+    import util
+    _isolate_timings(monkeypatch, tmp_path)
+    util.record_timing("detect", 600.0)
+    util.record_timing("caption", 300.0)
+    # A later run reruns only OCR; detect and caption skipped entirely.
+    util.record_timing("ocr", 42.0)
+    t = util.load_timings()
+    assert set(t) == {"detect", "caption", "ocr"}
+    assert t["detect"]["seconds"] == 600.0    # survived, not erased
+    assert t["ocr"]["seconds"] == 42.0
+
+
+def test_rerunning_a_stage_overwrites_its_old_timing(monkeypatch, tmp_path):
+    import util
+    _isolate_timings(monkeypatch, tmp_path)
+    util.record_timing("detect", 600.0)
+    util.record_timing("detect", 550.0)
+    assert util.load_timings()["detect"]["seconds"] == 550.0
+
+
+def test_network_stages_are_flagged(monkeypatch, tmp_path):
+    """eval_system reports LLM wait separately from local compute, which it can
+    only do if the record says which kind of stage it was."""
+    import util
+    _isolate_timings(monkeypatch, tmp_path)
+    util.record_timing("narrate", 90.0)
+    util.record_timing("detect", 10.0)
+    t = util.load_timings()
+    assert t["narrate"]["network"] is True
+    assert t["detect"]["network"] is False
+
+
+def test_time_stage_records_duration(monkeypatch, tmp_path):
+    import util
+    _isolate_timings(monkeypatch, tmp_path)
+    with util.time_stage("extract"):
+        pass
+    rec = util.load_timings()["extract"]
+    assert rec["seconds"] >= 0.0 and "measured_at" in rec
+
+
+def test_time_stage_does_not_record_a_crashed_stage(monkeypatch, tmp_path):
+    """A partial duration would understate the real cost and quietly corrupt the
+    performance report, so a raising stage must leave no measurement behind."""
+    import util
+    _isolate_timings(monkeypatch, tmp_path)
+    with pytest.raises(RuntimeError):
+        with util.time_stage("detect"):
+            raise RuntimeError("model failed to load")
+    assert "detect" not in util.load_timings()
+
+
+def test_load_timings_survives_a_corrupt_file(monkeypatch, tmp_path):
+    """Timings are a measurement, not an input: a truncated file must never take
+    down the pipeline."""
+    import util
+    _isolate_timings(monkeypatch, tmp_path)
+    import config
+    config.STAGE_TIMINGS_JSON.write_text("{not json")
+    assert util.load_timings() == {}
+
+
+# ------------------------------------------------- M4: system evaluation
+def test_timing_report_splits_local_from_network(monkeypatch, tmp_path):
+    import util
+    import eval_system
+    _isolate_timings(monkeypatch, tmp_path)
+    util.record_timing("detect", 100.0)
+    util.record_timing("ocr", 50.0)
+    util.record_timing("narrate", 200.0)
+    t = eval_system.timing_report()
+    assert t["local_compute_sec"] == 150.0
+    assert t["network_llm_sec"] == 200.0
+    assert t["total_sec"] == 350.0
+    # the only local stage worth optimising is named
+    assert t["slowest_local_stage"] == "detect"
+
+
+def test_timing_report_reports_absence_rather_than_guessing(monkeypatch, tmp_path):
+    import eval_system
+    _isolate_timings(monkeypatch, tmp_path)
+    assert eval_system.timing_report()["status"] == "no timings recorded"
+
+
+def test_fragmentation_finding_fires_and_then_removes_itself():
+    """Limitations are predicates over the metrics, not prose beside them: fix
+    the number and the finding disappears from the next report."""
+    import eval_system
+    q = {"faces": {"mean_clusters_per_person": 3.09, "pairwise_recall": 0.186,
+                   "completeness": 0.702, "total_frames": 1415},
+         "text_and_captions": {}, "search": {}, "narration": {}}
+    areas = [c["area"] for c in eval_system._checks(q, {"status": "none"})]
+    assert "Identity grouping" in areas
+
+    q["faces"]["mean_clusters_per_person"] = 1.0      # perfect grouping
+    areas = [c["area"] for c in eval_system._checks(q, {"status": "none"})]
+    assert "Identity grouping" not in areas
+
+
+def test_scope_limitation_is_always_reported():
+    """No metric can surface what was never built, so the 1-FPS vision-only
+    scope is stated unconditionally."""
+    import eval_system
+    q = {"faces": {"total_frames": 1415}, "text_and_captions": {},
+         "search": {}, "narration": {}}
+    assert any(c["area"] == "Scope"
+               for c in eval_system._checks(q, {"status": "none"}))
+
+
+def test_checks_survive_a_milestone_that_never_ran():
+    """A Milestone 1 user has no search labels and no story; the report must
+    still build from whatever exists."""
+    import eval_system
+    q = {"faces": {}, "text_and_captions": {}, "search": {}, "narration": {}}
+    assert isinstance(eval_system._checks(q, {"status": "none"}), list)
+
+
+def _minimal_report(realtime_local):
+    """A report dict wide enough for _write_markdown, parameterised on the one
+    field each summary regression turns on."""
+    return {
+        "timing": {"status": "ok", "video_duration_sec": 1415.5,
+                   "total_min": 54.5, "total_sec": 3269.0,
+                   "local_compute_sec": 3145.4, "network_llm_sec": 123.6,
+                   "sec_per_frame_local": 2.223, "frames_processed": 1415,
+                   "realtime_factor_local": realtime_local,
+                   "realtime_factor_total": realtime_local, "stages": []},
+        "quality": {
+            "faces": {"cannot_link_precision": 1.0},
+            "text_and_captions": {"ocr_detect_precision": 1.0},
+            "search": {},
+            "narration": {"chronology": 1.0, "coverage": 0.917}},
+        "limitations": []}
+
+
+def test_summary_reads_ocr_precision_from_the_right_metric(monkeypatch, tmp_path):
+    """The overall-performance paragraph must pull OCR precision from the
+    text/captions metrics, not the faces dict where it does not exist and would
+    silently render 'n/a' -- a self-flattering blank in the one section that
+    claims not to flatter."""
+    import config, eval_system
+    monkeypatch.setattr(config, "SYSTEM_EVAL_MD", tmp_path / "eval_system.md")
+    eval_system._write_markdown(_minimal_report(0.45))
+    md = (tmp_path / "eval_system.md").read_text()
+    assert "100.0% OCR precision" in md
+    assert "n/a OCR precision" not in md
+
+
+def test_summary_states_the_real_direction_of_the_realtime_factor(monkeypatch, tmp_path):
+    """A realtime factor below 1 means slower than playback. The summary must
+    read the number rather than assume the flattering 'faster' direction."""
+    import config, eval_system
+    monkeypatch.setattr(config, "SYSTEM_EVAL_MD", tmp_path / "eval_system.md")
+
+    eval_system._write_markdown(_minimal_report(0.45))    # 2.22x slower
+    slow = (tmp_path / "eval_system.md").read_text()
+    assert "2.22x slower than the video plays" in slow
+    assert "faster than the video plays" not in slow
+
+    eval_system._write_markdown(_minimal_report(2.0))     # genuinely faster
+    fast = (tmp_path / "eval_system.md").read_text()
+    assert "2.0x faster than the video plays" in fast
+    assert "slower than the video plays" not in fast
+
+
+# ---------------------------------------- M4: confidence intervals (small n)
+def test_wilson_interval_is_wide_at_100pct_of_a_small_sample():
+    """A bare 100% hides its sample size. Wilson must report an honest lower
+    bound well under 1 for 11/11, and stay inside [0,1]."""
+    import eval_system
+    lo, hi = eval_system.wilson_ci(11, 11)
+    assert hi == 1.0
+    assert lo < 0.80            # 11/11 is really "74%..100%", not a certainty
+    # And a large sample of the same rate is genuinely tight.
+    lo_big, _ = eval_system.wilson_ci(1000, 1000)
+    assert lo_big > 0.99
+
+
+def test_prop_reports_interval_and_sample_size():
+    import eval_system
+    s = eval_system._prop(11, 13)          # OCR recall: 11 of 13
+    assert "n=13" in s and "95% CI" in s and "84.6%" in s
+    assert eval_system._prop(None, 0) == "n/a"
+
+
+# ------------------------------------------------- M4: staleness guard
+def test_staleness_flags_an_eval_older_than_its_source(monkeypatch, tmp_path):
+    """The system report only reduces over other harnesses' JSON, so an eval
+    that predates the artifact it scored is silently wrong. The guard must catch
+    exactly that, and clear once the eval is regenerated."""
+    import os
+    import config
+    import eval_system
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    ident = tmp_path / "identities.csv"
+    monkeypatch.setattr(config, "REPORT_DIR", reports)
+    monkeypatch.setattr(config, "IDENTITIES_CSV", ident)
+
+    report_json = reports / "eval_labeled.json"
+    report_json.write_text("{}")
+    ident.write_text("track_id,face_id\n")
+    os.utime(report_json, (1_000_000, 1_000_000))          # eval at T
+    os.utime(ident, (1_000_200, 1_000_200))                # source at T+200: stale
+    assert any(s["report"] == "eval_labeled.json"
+               for s in eval_system.staleness_report())
+
+    os.utime(report_json, (1_000_400, 1_000_400))          # rerun: eval now newest
+    assert not any(s["report"] == "eval_labeled.json"
+                   for s in eval_system.staleness_report())
+
+
+def test_stale_inputs_surface_as_a_banner(monkeypatch, tmp_path):
+    import config
+    import eval_system
+    monkeypatch.setattr(config, "SYSTEM_EVAL_MD", tmp_path / "eval_system.md")
+    report = _minimal_report(0.45)
+    report["stale_inputs"] = [{"report": "eval_labeled.json",
+                               "outdated_by": ["identities.csv"]}]
+    eval_system._write_markdown(report)
+    md = (tmp_path / "eval_system.md").read_text()
+    assert "Stale inputs" in md and "eval_labeled.json" in md
+
+
+# ------------------------------------------------- M4: report consistency
+def test_summary_ocr_precision_matches_the_table(monkeypatch, tmp_path):
+    """Section 4's prose and Section 2's table read the same metric; a wiring
+    slip (the bug that shipped once) makes them disagree. Assert they can't."""
+    import config
+    import eval_system
+    monkeypatch.setattr(config, "SYSTEM_EVAL_MD", tmp_path / "eval_system.md")
+    report = _minimal_report(0.45)
+    # 100% OCR precision must appear in BOTH the table and the closing summary.
+    report["quality"]["text_and_captions"].update(
+        {"ocr_tp": 11, "ocr_fp": 0, "ocr_fn": 2})
+    eval_system._write_markdown(report)
+    md = (tmp_path / "eval_system.md").read_text()
+    assert "100.0% OCR precision" in md            # summary
+    assert "OCR detection precision" in md          # table row present
+    assert "n/a OCR precision" not in md
+
+
+# ------------------------------------------------- M2: reciprocal rank fusion
+def test_rrf_rewards_agreement_across_rankers():
+    """An item ranked well by both rankers must beat one ranked well by only
+    one -- the whole reason to fuse text and visual."""
+    from search import reciprocal_rank_fusion
+    fused = reciprocal_rank_fusion([[1, 2, 3], [1, 3, 4]])
+    order = [fid for fid, _ in fused]
+    assert order[0] == 1                       # top of both
+    assert order.index(3) < order.index(2)     # 3 is in both lists, 2 in one
+    assert set(order) == {1, 2, 3, 4}          # union, deduplicated
+
+
+def test_rrf_is_deterministic_on_ties():
+    from search import reciprocal_rank_fusion
+    a = reciprocal_rank_fusion([[7, 8], [9, 10]])
+    b = reciprocal_rank_fusion([[7, 8], [9, 10]])
+    assert a == b                              # stable ordering for equal scores
+
+
+# ------------------------------------------------- M4: guarded eval wiring
+def test_run_guarded_swallows_a_missing_input(monkeypatch):
+    """The pipeline eval stage now regenerates label-dependent harnesses; a
+    missing label file must degrade to a log line, never crash the run."""
+    import eval as evalmod
+
+    class _Boom:
+        @staticmethod
+        def run():
+            raise FileNotFoundError("no ground_truth.csv")
+
+    monkeypatch.setattr(evalmod, "__import__", lambda name: _Boom, raising=False)
+    # Should not raise despite the harness raising FileNotFoundError.
+    evalmod._run_guarded("eval_labeled")
+
+
+# ------------------------------------------------- M4b: atomic writes
+def test_write_json_atomic_roundtrips_and_leaves_no_temp(tmp_path):
+    import util
+    p = tmp_path / "sub" / "a.json"
+    util.write_json_atomic(p, {"x": 1}, indent=2)
+    assert json.loads(p.read_text()) == {"x": 1}
+    assert list(tmp_path.rglob("*.tmp")) == []      # temp cleaned up
+
+
+def test_atomic_write_failure_preserves_the_old_file(tmp_path):
+    """A crash mid-write must leave the previous complete file intact, never a
+    half-written one -- the whole reason for the temp+replace dance."""
+    import util
+    p = tmp_path / "a.txt"
+    util.write_text_atomic(p, "good")
+
+    with pytest.raises(TypeError):
+        # json.dumps of an unserializable object raises before any replace.
+        util.write_json_atomic(p, {1, 2, 3})        # set is not JSON-serializable
+    assert p.read_text() == "good"                  # old content survived
+    assert list(tmp_path.rglob("*.tmp")) == []      # no orphan temp left
+
+
+def test_require_columns_names_the_missing_one():
+    import util
+    df = pd.DataFrame({"frame_id": [1], "caption": ["x"]})
+    util.require_columns(df, ["frame_id"], "meta")   # present: no raise
+    with pytest.raises(ValueError, match="ocr_text"):
+        util.require_columns(df, ["frame_id", "ocr_text"], "meta")
+
+
+# ------------------------------------------------- M4b: parallel OCR helpers
+def test_ocr_task_returns_blank_row_for_a_missing_frame(monkeypatch, tmp_path):
+    """A worker must never crash the pool on an unreadable frame; it emits an
+    empty row so ocr.csv stays aligned with frames.csv."""
+    import config
+    import ocr
+    monkeypatch.setattr(config, "FRAME_DIR", tmp_path)
+    row = ocr._ocr_task((7, 7.0, "does_not_exist.jpg", "Face_01"))
+    assert row == [7, "7.000", "Face_01", "", 0, 0.0]
+
+
+def test_likely_has_text_gates_blank_vs_edgy(monkeypatch):
+    import numpy as np
+    import config
+    import ocr
+    monkeypatch.setattr(config, "OCR_TEXT_EDGE_MIN", 0.01)
+    blank = np.zeros((64, 64, 3), dtype=np.uint8)
+    assert ocr._likely_has_text(blank) is False
+    edgy = np.zeros((64, 64, 3), dtype=np.uint8)
+    edgy[::2, :, :] = 255                      # dense horizontal edges
+    assert ocr._likely_has_text(edgy) is True
+
+
+# ------------------------------------------ M3: narration grounding verification
+def test_verify_grounding_drops_unsupported_keeps_grounded_and_headings():
+    import narrate
+    digest = "train platform victoria station passengers underground escalator"
+    story = ("## Victoria Line\n\n"
+             "The train arrived at the crowded platform.\n"
+             "A dragon breathed fire across the ancient castle battlements.")
+    out, dropped = narrate.verify_grounding(story, digest)
+    assert dropped == 1
+    assert "## Victoria Line" in out          # heading untouched
+    assert "train arrived" in out             # grounded sentence kept
+    assert "dragon" not in out                # hallucinated sentence removed
+
+
+def test_verify_grounding_keeps_short_asides_it_cannot_judge():
+    """A sentence with too few content words is noise to the metric, so it is
+    kept rather than condemned on a coin-flip."""
+    import narrate
+    out, dropped = narrate.verify_grounding("It moved.", "train platform")
+    assert dropped == 0 and "It moved." in out
+
+
+# ------------------------------------------------- M3b: LLM provider fallback
+def test_providers_order_key_then_local(monkeypatch):
+    import config
+    import llm
+    monkeypatch.setattr(llm, "api_key", lambda: "sk-x")
+    monkeypatch.setattr(config, "NARRATE_FALLBACK_BASE_URL", "http://local:11434/v1")
+    monkeypatch.setattr(config, "NARRATE_FALLBACK_MODEL", "llava")
+    names = [p[0] for p in llm._providers("gemma")]
+    assert names == ["openrouter", "local"]
+
+    monkeypatch.setattr(llm, "api_key", lambda: None)   # no key -> local only
+    assert [p[0] for p in llm._providers("gemma")] == ["local"]
+
+    monkeypatch.setattr(config, "NARRATE_FALLBACK_BASE_URL", "")
+    assert llm._providers("gemma") == []                # nothing to try
+
+
+def test_post_falls_back_to_local_when_openrouter_is_exhausted(monkeypatch):
+    import sys
+    import config
+    import llm
+
+    class _Resp:
+        def __init__(self, status, payload=None, text=""):
+            self.status_code, self._p, self.text = status, payload or {}, text
+            self.headers = {}
+        def json(self):
+            return self._p
+
+    class _FakeRequests:
+        RequestException = Exception
+        def post(self, url, **kw):
+            if "openrouter" in url:
+                return _Resp(429, text="rate limited")          # always throttled
+            return _Resp(200, {"choices": [{"message":
+                        {"content": "local story"}}]})
+
+    monkeypatch.setitem(sys.modules, "requests", _FakeRequests())
+    monkeypatch.setattr(llm, "api_key", lambda: "sk-x")
+    monkeypatch.setattr(config, "NARRATE_BASE_URL", "https://openrouter.ai/api/v1")
+    monkeypatch.setattr(config, "NARRATE_FALLBACK_BASE_URL", "http://local:11434/v1")
+    monkeypatch.setattr(config, "NARRATE_FALLBACK_MODEL", "llava")
+    monkeypatch.setattr(config, "NARRATE_MAX_RETRIES", 1)   # 429 fails fast, no sleep
+
+    assert llm._post("gemma", "hi", [], {}) == "local story"
+
+
+# ------------------------------------------------- M4a: speech transcription
+def test_segments_by_frame_interval_join():
+    import transcribe
+    segs = [{"start": 0.0, "end": 2.0, "text": "mind the gap"},
+            {"start": 5.0, "end": 8.0, "text": "next station Bank"}]
+    ts = {0: 1.0, 1: 3.0, 2: 6.0, 3: 8.0}      # frame 3 == end boundary (exclusive)
+    out = transcribe.segments_by_frame(segs, ts)
+    assert out == {0: "mind the gap", 2: "next station Bank"}
+    assert 1 not in out and 3 not in out       # silence + exclusive end
+
+
+def test_clean_segments_drops_filler_and_loops_keeps_speech(monkeypatch):
+    """Verified against real output: Whisper emits 'You' over silence and loops a
+    phrase over ambient noise, while genuine announcements recur only a few times."""
+    import config
+    import transcribe
+    monkeypatch.setattr(config, "WHISPER_MAX_REPEAT", 8)
+    segs = ([{"start": i, "end": i + 1, "text": "You"} for i in range(22)]
+            + [{"start": 100 + i, "end": 101 + i, "text": "It's our mission."}
+               for i in range(19)]
+            + [{"start": 700, "end": 702,
+                "text": "The next train to Stratford will arrive in two minutes."},
+               {"start": 740, "end": 742,
+                "text": "The next train to Stratford will arrive in two minutes."}])
+    kept = transcribe.clean_segments(segs)
+    assert len(kept) == 2                          # only the real announcement
+    assert all("Stratford" in s["text"] for s in kept)
+
+
+def test_review_flag_directs_attention_to_borderline_tracks():
+    """The labeling sheet flags tracks the templates say are borderline: a near
+    neighbour in another identity (merge?) or weak cohesion in its own (split?)."""
+    from make_labelsheet import review_flag
+    m, s = 0.50, 0.40                          # merge_cos, split_cos
+    assert review_flag(0.9, 0.3, m, s) == ""            # locally confident
+    assert review_flag(0.9, 0.6, m, s) == "merge?"      # close cross-identity nbr
+    assert review_flag(0.2, 0.3, m, s) == "split?"      # weak own-group cohesion
+    assert review_flag(0.2, 0.6, m, s) == "merge? split?"
+
+
+def test_frame_document_folds_in_speech():
+    import embed_text
+    doc = embed_text.frame_document("a platform", "VICTORIA", "mind the gap")
+    assert "platform" in doc and "VICTORIA" in doc and "mind the gap" in doc
+    # No speech -> identical to the old caption+ocr document.
+    assert embed_text.frame_document("a platform", "VICTORIA") == \
+        "a platform. VICTORIA"
+
+
+# ------------------------------------------------- M4b: face super-resolution
+def test_small_face_qualifies_by_shorter_side(monkeypatch):
+    import config
+    import detect_faces
+    monkeypatch.setattr(config, "SR_MIN_PX", 60)
+    assert detect_faces._small_face([0, 0, 45, 200]) is True    # 45px short side
+    assert detect_faces._small_face([0, 0, 80, 90]) is False
+
+
+def test_load_sr_disables_gracefully_when_model_missing(monkeypatch, tmp_path):
+    """Enabling SR without providing the model file must disable SR with a
+    warning, never crash detection."""
+    import config
+    import detect_faces
+    monkeypatch.setattr(detect_faces, "_sr_state", {})          # clear cache
+    monkeypatch.setattr(config, "SR_ENABLE", True)
+    monkeypatch.setattr(config, "SR_MODEL_PATH", tmp_path / "nope.pb")
+    assert detect_faces._load_sr() is None
+
+    monkeypatch.setattr(detect_faces, "_sr_state", {})
+    monkeypatch.setattr(config, "SR_ENABLE", False)
+    assert detect_faces._load_sr() is None
