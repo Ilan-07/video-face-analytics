@@ -1310,6 +1310,24 @@ def test_segments_by_frame_interval_join():
     assert 1 not in out and 3 not in out       # silence + exclusive end
 
 
+def test_clean_segments_drops_filler_and_loops_keeps_speech(monkeypatch):
+    """Verified against real output: Whisper emits 'You' over silence and loops a
+    phrase over ambient noise, while genuine announcements recur only a few times."""
+    import config
+    import transcribe
+    monkeypatch.setattr(config, "WHISPER_MAX_REPEAT", 8)
+    segs = ([{"start": i, "end": i + 1, "text": "You"} for i in range(22)]
+            + [{"start": 100 + i, "end": 101 + i, "text": "It's our mission."}
+               for i in range(19)]
+            + [{"start": 700, "end": 702,
+                "text": "The next train to Stratford will arrive in two minutes."},
+               {"start": 740, "end": 742,
+                "text": "The next train to Stratford will arrive in two minutes."}])
+    kept = transcribe.clean_segments(segs)
+    assert len(kept) == 2                          # only the real announcement
+    assert all("Stratford" in s["text"] for s in kept)
+
+
 def test_frame_document_folds_in_speech():
     import embed_text
     doc = embed_text.frame_document("a platform", "VICTORIA", "mind the gap")

@@ -57,6 +57,28 @@ def _extract_audio(video: Path, wav: Path) -> bool:
     return True
 
 
+def clean_segments(segments: list) -> list:
+    """Drop Whisper's non-speech hallucinations, keeping genuine speech.
+
+    Two artifacts dominate transcription of mostly-ambient footage: filler tokens
+    emitted over silence ("You", "Thank you"), and a single mis-heard phrase looped
+    verbatim over minutes of noise. Real announcements vary and recur only a few
+    times, so a text repeated implausibly often (>= WHISPER_MAX_REPEAT) is treated
+    as a loop and removed. Pure and unit-tested -- the filter, not the model call,
+    is the part that must stay correct."""
+    from collections import Counter
+    counts = Counter(s["text"].strip().lower() for s in segments)
+    out = []
+    for s in segments:
+        norm = s["text"].strip().lower()
+        if not norm or norm in config.WHISPER_FILLER:
+            continue
+        if counts[norm] >= config.WHISPER_MAX_REPEAT:
+            continue
+        out.append(s)
+    return out
+
+
 def segments_by_frame(segments: list, timestamps: dict) -> dict:
     """frame_id -> the speech spoken at that frame's timestamp.
 
@@ -98,14 +120,18 @@ def run() -> int:
                  config.WHISPER_DEVICE, config.WHISPER_COMPUTE)
         model = WhisperModel(config.WHISPER_MODEL, device=config.WHISPER_DEVICE,
                              compute_type=config.WHISPER_COMPUTE)
-        seg_iter, info = model.transcribe(str(wav))
-        segments = [{"start": round(s.start, 3), "end": round(s.end, 3),
-                     "text": s.text.strip()} for s in seg_iter]
+        seg_iter, info = model.transcribe(
+            str(wav), vad_filter=config.WHISPER_VAD,
+            condition_on_previous_text=config.WHISPER_CONDITION_ON_PREV)
+        raw = [{"start": round(s.start, 3), "end": round(s.end, 3),
+                "text": s.text.strip()} for s in seg_iter]
 
+    segments = clean_segments(raw)
     _write({"model": config.WHISPER_MODEL, "language": info.language,
             "status": "ok", "segments": segments})
-    log.info("[transcribe] %d segments (%s) -> %s", len(segments),
-             info.language, config.TRANSCRIPT_JSON.name)
+    log.info("[transcribe] %d segments kept of %d (%s), dropped %d "
+             "hallucinations -> %s", len(segments), len(raw), info.language,
+             len(raw) - len(segments), config.TRANSCRIPT_JSON.name)
     return len(segments)
 
 

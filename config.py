@@ -200,6 +200,22 @@ WHISPER_ENABLE = True         # set False to skip transcription entirely
 WHISPER_MODEL = "base.en"     # tiny.en|base.en|small.en|medium.en|large-v3
 WHISPER_DEVICE = "cpu"        # ctranslate2 backend: "cpu" | "cuda" (no MPS)
 WHISPER_COMPUTE = "int8"      # "int8" | "int8_float16" | "float32"
+# Hallucination control, tuned against this footage. Without help, Whisper emits
+# "You" over silence and loops a mis-heard phrase over minutes of train noise.
+# Measured here: Silero VAD is too aggressive -- it drops the faint platform PA
+# along with the noise (0 segments) -- so it is OFF by default and left as an
+# option for cleaner audio. What works instead: disable context-conditioning to
+# break repetition loops, then drop pure-filler segments and any text that repeats
+# implausibly often (a real announcement varies; a hallucination loops verbatim).
+WHISPER_VAD = False           # Silero voice-activity filter; too aggressive here
+# Left ON (Whisper's default): measured, it makes hallucinations loop the SAME
+# phrase verbatim, which clean_segments removes cleanly by repeat count. Turning
+# it off scattered the hallucinations into varied one-offs that no filter catches
+# without also dropping real speech -- worse, not better.
+WHISPER_CONDITION_ON_PREV = True
+WHISPER_MAX_REPEAT = 6        # drop any transcript text repeated >= this many times
+WHISPER_FILLER = {"you", "thank you", "thanks for watching", "bye", "the end",
+                  "thank you.", "you.", "."}   # canonical silence-hallucinations
 
 # ---- Milestone 2: OCR (Tesseract via pytesseract) ----
 # Tesseract is a system binary (brew install tesseract). We keep OCR torch-free
@@ -472,7 +488,8 @@ _STAGE_PARAMS = {
     "ocr": ["FPS", "OCR_LANG", "OCR_PSM", "OCR_MIN_CONF", "OCR_MIN_TOKEN_LEN",
             "OCR_UPSCALE", "OCR_LEXICON_ENABLE", "OCR_LEXICON_CUTOFF",
             "OCR_LEXICON_MIN_LEN", "OCR_LEXICON"],
-    "transcribe": ["WHISPER_ENABLE", "WHISPER_MODEL"],
+    "transcribe": ["WHISPER_ENABLE", "WHISPER_MODEL", "WHISPER_VAD",
+                   "WHISPER_CONDITION_ON_PREV"],
     "caption": ["FPS", "CAPTION_MODEL", "CAPTION_MAX_TOKENS", "CAPTION_PROMPT",
                 "CAPTION_ECHO_FIX", "CAPTION_RECAPTION_PROMPT",
                 "CAPTION_TEXT_ECHO_JACCARD"],

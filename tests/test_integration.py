@@ -37,6 +37,7 @@ def _seed_fixture(tmp_path, monkeypatch):
         "TEXT_EMB_FILE": data / "embeddings" / "text_embeddings.npz",
         "IMAGE_EMB_FILE": data / "embeddings" / "image_embeddings.npz",
         "SCENES_JSON": data / "scenes.json", "TIMELINE_JSON": data / "timeline.json",
+        "TRANSCRIPT_JSON": data / "transcript.json",
         "REPORT_DIR": tmp_path / "reports",
     }.items():
         monkeypatch.setattr(config, attr, path)
