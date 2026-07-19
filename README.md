@@ -424,19 +424,26 @@ not attest, turning the grounding metric into an enforced floor.
 
 ### Re-labeling the grouping ground truth
 The Milestone 1 accuracy numbers are scored against a hand-labeled
-`data/ground_truth.csv`. To (re)label:
+`data/ground_truth.csv`. The fast way is the interactive **"same person?" game**:
 ```bash
-.venv/bin/python make_labelsheet.py --prefill   # seed labels from the grouping
-open reports/labelsheet.html                     # verify groups; flags mark borderline
-# edit true_id in data/ground_truth.csv (one label per real person), then:
+.venv/bin/python make_label_game.py    # -> reports/label_game.html
+open reports/label_game.html           # play, then Export -> save as data/ground_truth.csv
 .venv/bin/python eval_labeled.py
 ```
-`labelsheet.html` groups tracks by predicted identity so you label by *verifying*
-groups, not annotating loose crops; `merge?`/`split?` flags (from the track
-templates) point at the borderline tracks. Re-running **preserves** existing
-`true_id` values. Labels are keyed to `track_id`, so settle detection first
-(e.g. `SR_ENABLE`) before labeling — clustering changes are safe, detection
-changes are not.
+It walks the tracks one at a time, suggests the most visually similar person
+already created (from the ArcFace track templates), and you decide with one key:
+`Y` same · `N` new person · `O` pick another · `I` ignore (non-face) · `U` undo.
+It builds consistent per-person clusters, persists to the browser so you can
+resume, and exports the full `ground_truth.csv`. Existing labels seed the game so
+prior work is never lost.
+
+Prefer a spreadsheet? `make_labelsheet.py --prefill` writes `reports/labelsheet.html`
+(tracks grouped by predicted identity, with `merge?`/`split?` review flags) and a
+seeded `data/ground_truth.csv` to edit directly; re-running **preserves** existing
+`true_id`.
+
+Either way: labels are keyed to `track_id`, so settle detection first (e.g.
+`SR_ENABLE`) before labeling — clustering changes are safe, detection changes are not.
 
 ## Run
 ```bash
