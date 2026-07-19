@@ -270,6 +270,69 @@ def visual_search(query: str, df: pd.DataFrame | None = None,
                               field="visual", cols=cols)
 
 
+def reciprocal_rank_fusion(rankings: list, k: int = 60) -> list:
+    """Fuse several ranked frame_id lists into one via Reciprocal Rank Fusion.
+
+    An item's fused score is the sum over rankers of 1/(k + rank), rank 1-based.
+    RRF reads only rank order, never the underlying scores, which is the whole
+    point here: text cosine and CLIP cosine live on different scales and cannot
+    be added directly, but their rank positions can. That is what lets the
+    semantic and visual indexes -- previously two separate user-picked modes --
+    become one ranking where either index can rescue a frame the other misses.
+    Returns [(frame_id, score), ...] highest first. Pure; unit-tested."""
+    scores: dict = {}
+    for ranking in rankings:
+        for rank, fid in enumerate(ranking, start=1):
+            scores[int(fid)] = scores.get(int(fid), 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def fused_search(query: str, df: pd.DataFrame | None = None,
+                 top_k: int | None = None,
+                 min_score: float | None = None) -> pd.DataFrame:
+    """Rank frames by Reciprocal Rank Fusion of the semantic (text) and visual
+    (CLIP) indexes, so a query that misses one index can still be rescued by the
+    other. `min_score` is accepted for signature parity but not applied: RRF
+    scores are not comparable to a cosine threshold."""
+    top_k = config.SEMANTIC_TOP_K if top_k is None else top_k
+    cols = ["frame_id", "timestamp_sec", "mmss", "filename", "frame_path",
+            "face_ids", "field", "score", "snippet"]
+    q = (query or "").strip()
+    if not q:
+        return pd.DataFrame(columns=cols)
+    if df is None:
+        df = load_metadata()
+
+    import embed_text
+    pool = max(top_k, config.FUSION_POOL)
+    sem = semantic_search(q, df=df, top_k=pool, min_score=0.0)
+    vis = visual_search(q, df=df, top_k=pool, min_score=0.0)
+    fused = reciprocal_rank_fusion(
+        [sem["frame_id"].tolist(), vis["frame_id"].tolist()],
+        k=config.FUSION_RRF_K)
+
+    by_id = {int(r.frame_id): r for r in df.itertuples(index=False)}
+    rows = []
+    for fid, sc in fused[:top_k]:
+        r = by_id.get(int(fid))
+        if r is None:
+            continue
+        doc = embed_text.frame_document(getattr(r, "caption", ""),
+                                        getattr(r, "ocr_text", ""))
+        rows.append({
+            "frame_id": int(r.frame_id),
+            "timestamp_sec": float(r.timestamp_sec),
+            "mmss": fmt_ts(float(r.timestamp_sec)),
+            "filename": r.filename,
+            "frame_path": str(config.FRAME_DIR / r.filename),
+            "face_ids": list(r.face_ids),
+            "field": "fused",
+            "score": round(float(sc), 4),
+            "snippet": (doc[:80] + "…") if len(doc) > 80 else doc,
+        })
+    return pd.DataFrame(rows, columns=cols)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Search frame OCR text / captions")
     ap.add_argument("query", help="word or phrase to search for")
@@ -282,17 +345,20 @@ def main():
                     help="rank frames by meaning using text (caption+OCR) embeddings")
     ap.add_argument("--visual", action="store_true",
                     help="rank frames by image content using CLIP (caption-free)")
+    ap.add_argument("--fused", action="store_true",
+                    help="reciprocal-rank fusion of semantic + visual")
     ap.add_argument("--top-k", type=int, default=None,
-                    help="max results for --semantic/--visual")
+                    help="max results for --semantic/--visual/--fused")
     ap.add_argument("--no-group", action="store_true",
                     help="list every matching frame instead of time ranges")
     ap.add_argument("--open", action="store_true", dest="open_frames",
                     help="open the matching frames (one per range) in the viewer")
     args = ap.parse_args()
 
-    if args.semantic or args.visual:
-        kind = "visual" if args.visual else "semantic"
-        finder = visual_search if args.visual else semantic_search
+    if args.semantic or args.visual or args.fused:
+        kind = "fused" if args.fused else "visual" if args.visual else "semantic"
+        finder = (fused_search if args.fused
+                  else visual_search if args.visual else semantic_search)
         res = finder(args.query, top_k=args.top_k)
         if res.empty:
             print(f'No frames {kind}ally matched "{args.query}".')

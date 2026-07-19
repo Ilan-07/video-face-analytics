@@ -127,11 +127,22 @@ Methodology, model choices, and alternatives: `DOCUMENTATION.md`.
    → caption into `data/frame_metadata.{json,csv}`.
 9. **Semantic index** (`embed_text.py`) — embeds each frame's caption + OCR text with
    a sentence-transformer → `data/embeddings/text_embeddings.npz`.
-10. **Evaluation** (`eval.py`, `eval_cooccurrence.py`, `eval_continuity.py`) —
+10. **Visual index** (`embed_image.py`) — CLIP image vectors per frame, so retrieval
+    is not hostage to caption quality → `data/embeddings/image_embeddings.npz`.
+11. **Scene segmentation** (`scenes.py`) — cuts on adjacent-frame CLIP similarity +
+    title cards → `data/scenes.json` (Milestone 3).
+12. **Narration** (`describe_scenes.py`, `narrate.py`) — story, summary and event
+    timeline via Gemma 4; the only network stages, and skippable → `data/story.json`,
+    `data/timeline.json` (Milestone 3).
+13. **Evaluation** (`eval.py`, `eval_cooccurrence.py`, `eval_continuity.py`) —
     complete-linkage threshold sweep + label-free precision/recall checks.
+14. **System evaluation** (`eval_system.py`) — rolls the per-stage timings and every
+    milestone's accuracy harness into `reports/eval_system.{json,md}` (Milestone 4).
 
 Stages communicate through CSV/artifact files under `data/`, so any stage can be
-rerun in isolation and every intermediate is inspectable.
+rerun in isolation and every intermediate is inspectable. Each stage is timed
+through `util.time_stage` and fingerprints its config, so it reruns only when its
+inputs or settings actually change.
 
 ## Milestone 2: searchable frame dataset
 
@@ -180,10 +191,19 @@ IDs present and a snippet of the matched text; `--no-group` lists every frame.
 
 **Semantic** — `search.py "underground train" --semantic` ranks frames by embedding
 similarity, surfacing captions like *"a subway train"* and *"a train coming out of
-the tunnel"* that share **no literal words** with the query. The Streamlit app
-exposes both modes (a Lexical/Semantic toggle) plus the fuzzy/regex/caption options,
-and is **deep-linkable**: the controls seed from URL query params
-(`?q=underground+train&mode=Semantic`), so any result view can be shared or
+the tunnel"* that share **no literal words** with the query.
+
+**Visual** — `search.py "an escalator" --visual` ranks by CLIP image content, so it
+finds frames whose captions never mention the query at all.
+
+**Fused** — `search.py "underground train" --fused` combines the semantic and visual
+rankings with Reciprocal Rank Fusion, so either index can rescue a query the other
+misses. On the 10-query eval set it reaches **precision@5 = 0.90**, ahead of semantic
+alone (0.84) and visual alone (0.42).
+
+The Streamlit app exposes all four modes (a Lexical/Semantic/Visual/Fused toggle) plus
+the fuzzy/regex/caption options, and is **deep-linkable**: the controls seed from URL
+query params (`?q=underground+train&mode=Fused`), so any result view can be shared or
 bookmarked.
 
 ### Milestone 2 in action
@@ -278,6 +298,44 @@ the scene's keyframe — black title cards, station roundels, and platform foota
 
 ![Event timeline with keyframes](screenshots/09_timeline.png)
 
+## Milestone 4: integrated system & evaluation
+
+Milestone 4 does not add a new perception capability. It closes the system: one
+executable pipeline, one application over every artifact, and one honest account
+of what the whole thing costs and how well it works.
+
+**One pipeline.** `run_pipeline.py` runs all fourteen stages end to end, from a
+URL to a narrated, searchable dataset. It was already the integration point; what
+Milestone 4 adds is that every stage is now timed through `util.time_stage` and
+its duration merged into `data/stage_timings.json`. The merge is the interesting
+part: the pipeline is idempotent, so on any run after the first most stages skip
+and would measure ~0s. Each stage therefore keeps its last *measured* duration
+until it genuinely reruns, and the file always describes a full cold build even
+though it was assembled across several runs.
+
+**One application.** `search_app.py` grows from two tabs to five — Dashboard,
+Search, Faces, Captions & OCR, and Story & Timeline — covering every Task 2 and
+Task 3 requirement over the artifacts the pipeline already produces. Each tab
+degrades to an instruction rather than an exception when its stage has not run, so
+a Milestone 1 user with no captions and no API key still gets a working app.
+
+**One evaluation.** `eval_system.py` is a reducer, not a new measurement: it reads
+the stage timings and the JSON already emitted by every milestone's harness and
+reports processing time, output quality, and limitations. Its one design
+commitment is that **the limitations are derived from the metrics rather than
+written beside them** — each finding is a predicate over the numbers, so improving
+a number removes its finding from the next report automatically. A limitations
+section that cannot go stale is the only kind worth committing.
+
+Timing is reported as local compute *separately* from network wait. The narration
+stages measure how long a free-tier OpenRouter endpoint made us queue, so folding
+them into a throughput figure would report someone else's rate limiter as this
+pipeline's latency.
+
+See [`docs/milestone4_methodology.md`](docs/milestone4_methodology.md) for the full
+write-up and [`reports/eval_system.md`](reports/eval_system.md) for the generated
+report.
+
 ## Outputs
 
 After a run, results land in `reports/` and `data/`:
@@ -303,6 +361,8 @@ After a run, results land in `reports/` and `data/`:
 | `data/llm_cache/` | Committed LLM responses so narration + eval replay offline, no API key (Milestone 3). |
 | `reports/eval_story.{json,md}` / `STORY_COMPARISON.md` | Prompt-strategy scores + side-by-side stories (Milestone 3). |
 | `reports/video_summary.md` | The generated video summary (Milestone 3). |
+| `data/stage_timings.json` | Measured wall-clock per stage, merged across runs (Milestone 4). |
+| `reports/eval_system.{json,md}` | End-to-end performance: processing time, quality, derived limitations (Milestone 4). |
 
 ## Setup
 ```bash
@@ -349,7 +409,10 @@ dependencies and is recommended only with the human review step:
 .venv/bin/python describe_scenes.py         # VLM keyframe descriptions (needs key)
 .venv/bin/python narrate.py --strategy all  # all four story strategies + summary + timeline
 .venv/bin/python eval_story.py              # score the stories (offline, replays cache)
-.venv/bin/python -m streamlit run search_app.py   # Search + Story & Timeline UI
+
+# Milestone 4:
+.venv/bin/python eval_system.py             # system evaluation: timing + quality + limitations
+.venv/bin/python -m streamlit run search_app.py   # the full application (5 tabs)
 ```
 
 ## Tests
@@ -380,6 +443,7 @@ embed_image.py       search.py           search_app.py      config.py
 util.py              eval.py             eval_search.py     eval_cooccurrence.py
 scenes.py            llm.py              describe_scenes.py narrate.py       # Milestone 3
 eval_story.py                                                               # Milestone 3
+eval_system.py                                                              # Milestone 4
 tests/               screenshots/        requirements.txt   DOCUMENTATION.md
 requirements-appearance.txt
 ```

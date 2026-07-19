@@ -1,5 +1,9 @@
 """Shared helpers: logging, geometry, image quality (Fix #7 robustness)."""
+import contextlib
+import json
 import logging
+import time
+from datetime import datetime, timezone
 
 import cv2
 
@@ -27,6 +31,57 @@ def get_logger() -> logging.Logger:
         log.propagate = False
         _logger = log
     return _logger
+
+
+# ---------------------------------------------------------- stage timing (M4)
+# Milestone 4 Task 4 needs the processing time of the whole system, but the
+# pipeline is idempotent: on any run after the first, most stages skip and
+# measure ~0s. So timings are MERGED into config.STAGE_TIMINGS_JSON -- a stage
+# that skips keeps whatever it last measured, and only a real rerun overwrites
+# it. The file therefore always describes a full cold build, assembled across
+# however many runs it took to produce the current artifacts.
+
+def load_timings() -> dict:
+    """Stage -> timing record, or {} when nothing has been measured yet."""
+    if not config.STAGE_TIMINGS_JSON.exists():
+        return {}
+    try:
+        return json.loads(config.STAGE_TIMINGS_JSON.read_text())
+    except (json.JSONDecodeError, OSError):
+        # A truncated timings file must never take down the pipeline: it is a
+        # measurement, not an input. Start fresh and let this run repopulate it.
+        get_logger().warning("stage_timings.json unreadable; starting fresh")
+        return {}
+
+
+def record_timing(stage: str, seconds: float, **meta) -> dict:
+    """Merge one measured stage duration into the timings file, and return it."""
+    timings = load_timings()
+    timings[stage] = {
+        "seconds": round(float(seconds), 3),
+        "measured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "network": stage in config.NETWORK_STAGES,
+        **meta,
+    }
+    config.STAGE_TIMINGS_JSON.parent.mkdir(parents=True, exist_ok=True)
+    config.STAGE_TIMINGS_JSON.write_text(json.dumps(timings, indent=2,
+                                                    sort_keys=True))
+    return timings[stage]
+
+
+@contextlib.contextmanager
+def time_stage(stage: str, **meta):
+    """Time a pipeline stage and persist the duration on success.
+
+    Written immediately rather than batched at the end so a run that crashes in
+    a later stage still leaves the earlier measurements on disk. A stage that
+    raises is NOT recorded: a partial duration would understate the real cost
+    and quietly corrupt the performance report."""
+    t0 = time.perf_counter()
+    yield
+    dt = time.perf_counter() - t0
+    record_timing(stage, dt, **meta)
+    get_logger().info("[time] %s took %.1fs", stage, dt)
 
 
 def iou(a, b) -> float:

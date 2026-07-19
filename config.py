@@ -258,6 +258,10 @@ IMAGE_EMB_FILE = EMB_DIR / "image_embeddings.npz"
 VISUAL_TOP_K = 20              # default max results for a visual query
 VISUAL_MIN_SCORE = 0.20        # drop matches below this CLIP cosine similarity
 
+# ---- Reciprocal Rank Fusion (semantic + visual) ----
+FUSION_RRF_K = 60             # RRF damping; 60 is the canonical Cormack et al. value
+FUSION_POOL = 50             # candidate depth pulled from each ranker before fusing
+
 # ---- Milestone 2: search-quality evaluation ----
 # make_search_labelsheet.py samples frames into SEARCH_LABELS_CSV for a human to
 # fill (true OCR text + a 1-5 caption-adequacy score); eval_search.py scores OCR
@@ -355,6 +359,22 @@ STORY_STRATEGY = "structured_role"   # the one promoted to data/story.json
 STORY_EVAL_NGRAM = 3          # n for the distinct-n-gram redundancy ratio
 STORY_GROUND_MIN_LEN = 4      # ignore content words shorter than this
 VIDEO_DURATION_SEC = 1415.5   # upper bound for timeline timestamp validation
+
+# ---- Milestone 4: end-to-end integration and system evaluation ----
+# run_pipeline times every stage through util.time_stage and merges the result
+# into STAGE_TIMINGS_JSON. The merge matters: the pipeline is idempotent, so a
+# second run skips almost every stage and would otherwise erase the cold-run
+# cost that is the only honest answer to "how long does this system take?".
+# Each stage therefore keeps its last MEASURED duration until it actually reruns.
+STAGE_TIMINGS_JSON = DATA / "stage_timings.json"
+SYSTEM_EVAL_JSON = REPORT_DIR / "eval_system.json"
+SYSTEM_EVAL_MD = REPORT_DIR / "eval_system.md"
+
+# Stages that call a network LLM. Their wall-clock is dominated by OpenRouter
+# free-tier queueing and 429 backoff, not by our compute, so eval_system reports
+# them separately -- averaging them into a per-frame throughput number would
+# describe someone else's rate limiter rather than this pipeline.
+NETWORK_STAGES = {"describe", "narrate"}
 
 # InsightFace model bundle (SCRFD detector + ArcFace recog + gender/age)
 MODEL_PACK = "buffalo_l"

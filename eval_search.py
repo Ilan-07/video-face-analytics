@@ -166,6 +166,13 @@ def run(k: int | None = None) -> dict:
         "visual": _score_retrieval(search.visual_search,
                                    config.IMAGE_EMB_FILE, k),
     }
+    # Fusion needs both indexes; gate on the text one but require both to exist so
+    # a Milestone-2-partial checkout degrades to a status instead of erroring.
+    if config.TEXT_EMB_FILE.exists() and config.IMAGE_EMB_FILE.exists():
+        metrics["fused"] = _score_retrieval(search.fused_search,
+                                            config.TEXT_EMB_FILE, k)
+    else:
+        metrics["fused"] = {"status": "needs both text and CLIP indexes"}
     with open(config.REPORT_DIR / "eval_search.json", "w") as f:
         json.dump(metrics, f, indent=2)
     _write_md(metrics, k)
@@ -223,6 +230,12 @@ def _write_md(m: dict, k: int) -> None:
                        note="Relevance is judged on the frame's caption/OCR text, "
                        "which favours the text path; the visual index retrieves "
                        "by image content and needs no caption at all.")
+    if "fused" in m:
+        L += _retrieval_md(f"5. Fused search — RRF(text, visual) (precision@{k})",
+                           m["fused"], k,
+                           note="Reciprocal Rank Fusion of the semantic and visual "
+                           "rankings, so either index can rescue a query the other "
+                           "misses. Same text-proxy relevance caveat as visual.")
 
     with open(config.REPORT_DIR / "eval_search.md", "w") as f:
         f.write("\n".join(L) + "\n")
