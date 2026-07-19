@@ -113,7 +113,15 @@ BEST_SHOT_DIST = 0.55    # cosine-distance ceiling. Complete-linkage on best sho
 # of face pose. Requires torchreid (extra dep); off by default. When enabled,
 # appearance.py embeds body crops and recognize fuses them -- allowing a looser
 # face match when clothing agrees. See appearance.py.
-APPEARANCE_ENABLE = False       # optional; needs requirements-appearance.txt
+APPEARANCE_ENABLE = True        # orthogonal body-ReID linking; needs
+                                # requirements-appearance.txt (torchreid). The
+                                # pipeline degrades to face-only if it is missing.
+                                # Measured win over face-only: with the face gate
+                                # below at 0.65 it lifts completeness 0.902->0.912
+                                # and recall 0.616->0.678 while HOLDING homogeneity
+                                # (0.956->0.953) -- better than loosening the face
+                                # ceiling alone, because the body match blocks the
+                                # false merges that pure face-loosening introduces.
 # Clothing-focused body crop: the torso BELOW the chin (head is already the face),
 # narrowed to suppress side-background -- shared backgrounds are the main cause of
 # clothing false-matches (e.g. dark seats in a transit scene).
@@ -121,9 +129,12 @@ BODY_W_SCALE = 2.4              # torso width as a multiple of face width
 BODY_DOWN_SCALE = 5.0          # torso height below the chin, in face-heights
 APPEARANCE_DIST = 0.25          # body-appearance cosine-distance ceiling (tight:
                                 # similar outfits in a shared setting false-match)
-APPEARANCE_FACE_DIST = 0.55     # looser-than-face-clustering ceiling allowed when
-                                # clothing agrees; complete-linkage so all best-shot
-                                # pairs must pass (no chaining into mixed clusters)
+APPEARANCE_FACE_DIST = 0.65     # face-distance ceiling allowed when clothing agrees.
+                                # MUST exceed CLUSTER_LINK_DIST (0.55) to add anything
+                                # -- below it the face clustering has already merged
+                                # the pair. 0.65 lets a body match bridge the 0.55-0.65
+                                # face-pose gap; complete-linkage so all best-shot pairs
+                                # must pass (no chaining into mixed clusters)
 APPEARANCE_FILE = EMB_DIR / "appearance.npz"
 
 # ---- False-positive backstop ----

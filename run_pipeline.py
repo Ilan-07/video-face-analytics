@@ -63,11 +63,19 @@ def main():
     #     linking). Gated by APPEARANCE_ENABLE; feeds recognize when present.
     if config.APPEARANCE_ENABLE:
         if ran or _stale("appearance", [config.APPEARANCE_FILE], args.force):
-            import appearance
-            with util.time_stage("appearance"):
-                appearance.compute()
-            _stamp("appearance")
-            ran = True
+            # torchreid is an optional dependency; if it (or its weights) is
+            # missing, skip appearance rather than crash -- recognize already
+            # falls back to face-only when no templates are present.
+            try:
+                import appearance
+                with util.time_stage("appearance"):
+                    appearance.compute()
+                _stamp("appearance")
+                ran = True
+            except (ImportError, RuntimeError) as e:
+                log.warning("[skip] appearance re-ID unavailable (%s); "
+                            "grouping falls back to face-only. Install it with "
+                            "requirements-appearance.txt.", e)
         else:
             log.info("[skip] appearance templates already computed")
 
