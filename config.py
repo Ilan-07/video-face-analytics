@@ -89,7 +89,7 @@ TEMPLATE_OUTLIER_COS = 0.40          # drop a face whose cosine to track mean < 
 # (the eps=0.55 failure) -- and is blocked by co-occurrence cannot-link: two
 # clusters that ever share a frame are different people and never merge.
 CLUSTER_LINK_ENABLE = True
-CLUSTER_LINK_DIST = 0.50             # the clustering distance ceiling. Complete
+CLUSTER_LINK_DIST = 0.55             # the clustering distance ceiling. Complete
                                      # linkage means every member pair is within
                                      # this, so clusters stay coherent (top-cluster
                                      # within-cosine ~0.73); 0.55+ starts merging
@@ -103,7 +103,7 @@ CLUSTER_LINK_DIST = 0.50             # the clustering distance ceiling. Complete
 # not cohesion -- is the validator here.
 BEST_SHOT_ENABLE = True
 BEST_SHOT_K = 3          # top-quality prototype faces compared per cluster
-BEST_SHOT_DIST = 0.50    # cosine-distance ceiling. Complete-linkage on best shots
+BEST_SHOT_DIST = 0.55    # cosine-distance ceiling. Complete-linkage on best shots
                          # (all prototype pairs must pass) lets this be loose enough
                          # to consolidate a person's FRONTAL clusters across scene
                          # cuts without chaining different people.
