@@ -422,6 +422,22 @@ The narration stage falls back to a local OpenAI-compatible endpoint
 rate-limited. `config.NARRATE_VERIFY` drops story sentences the scene digest does
 not attest, turning the grounding metric into an enforced floor.
 
+### Re-labeling the grouping ground truth
+The Milestone 1 accuracy numbers are scored against a hand-labeled
+`data/ground_truth.csv`. To (re)label:
+```bash
+.venv/bin/python make_labelsheet.py --prefill   # seed labels from the grouping
+open reports/labelsheet.html                     # verify groups; flags mark borderline
+# edit true_id in data/ground_truth.csv (one label per real person), then:
+.venv/bin/python eval_labeled.py
+```
+`labelsheet.html` groups tracks by predicted identity so you label by *verifying*
+groups, not annotating loose crops; `merge?`/`split?` flags (from the track
+templates) point at the borderline tracks. Re-running **preserves** existing
+`true_id` values. Labels are keyed to `track_id`, so settle detection first
+(e.g. `SR_ENABLE`) before labeling — clustering changes are safe, detection
+changes are not.
+
 ## Run
 ```bash
 .venv/bin/python run_pipeline.py            # full pipeline (config-aware, idempotent)

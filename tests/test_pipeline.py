@@ -1328,6 +1328,17 @@ def test_clean_segments_drops_filler_and_loops_keeps_speech(monkeypatch):
     assert all("Stratford" in s["text"] for s in kept)
 
 
+def test_review_flag_directs_attention_to_borderline_tracks():
+    """The labeling sheet flags tracks the templates say are borderline: a near
+    neighbour in another identity (merge?) or weak cohesion in its own (split?)."""
+    from make_labelsheet import review_flag
+    m, s = 0.50, 0.40                          # merge_cos, split_cos
+    assert review_flag(0.9, 0.3, m, s) == ""            # locally confident
+    assert review_flag(0.9, 0.6, m, s) == "merge?"      # close cross-identity nbr
+    assert review_flag(0.2, 0.3, m, s) == "split?"      # weak own-group cohesion
+    assert review_flag(0.2, 0.6, m, s) == "merge? split?"
+
+
 def test_frame_document_folds_in_speech():
     import embed_text
     doc = embed_text.frame_document("a platform", "VICTORIA", "mind the gap")
